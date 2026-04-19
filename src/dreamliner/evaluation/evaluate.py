@@ -1,14 +1,19 @@
 """Evaluate a trained DreamerV3 run: learning curves + per-scenario recovery stats.
 
-    uv run evaluate                              # latest run: plots + 50 eval rollouts
+    uv run evaluate                              # latest run: plots + 200 eval rollouts per checkpoint (best and latest)
     uv run evaluate runs/dreamer/baseline        # specific run
-    uv run evaluate --episodes 200               # bigger eval sample
+    uv run evaluate --episodes 500               # bigger eval sample
+    uv run evaluate --checkpoint best            # only best.pt
+    uv run evaluate --checkpoint latest          # only latest.pt
     uv run evaluate --no-eval                    # plots only, skip rollouts
 
+Both checkpoints face the same scenario draws (env is re-seeded per checkpoint)
+so outcomes are directly comparable.
+
 Outputs land under ``<logdir>/analysis/``:
-    - learning_curves.png   eval/train scalars from TensorBoard
-    - recovery_metrics.png  altitude loss, length, success rate per scenario
-    - eval_episodes.json    raw per-episode trajectory log
+    - learning_curves.png                learning curves (checkpoint-agnostic)
+    - recovery_metrics_<ckpt>.png        altitude loss, length, success rate per scenario
+    - eval_episodes_<ckpt>.json          raw per-episode trajectory log
 """
 
 from __future__ import annotations
@@ -29,8 +34,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("logdir", type=str, nargs="?", default=None,
                    help="runs/dreamer/<run> dir. Omit to auto-pick the latest run.")
-    p.add_argument("--episodes", type=int, default=50,
-                   help="Greedy eval episodes for recovery-metric histograms (default: 50).")
+    p.add_argument("--episodes", type=int, default=200,
+                   help="Greedy eval episodes for recovery-metric histograms (default: 200).")
+    p.add_argument("--checkpoint", choices=["best", "latest"], nargs="+",
+                   default=["best", "latest"],
+                   help="Which checkpoint(s) to roll out (default: both).")
     p.add_argument("--no-eval", action="store_true",
                    help="Skip rolling out the agent; only plot TensorBoard scalars.")
     return p.parse_args()
@@ -163,34 +171,43 @@ def main() -> None:
         print("--no-eval: skipping rollout phase.")
         return
 
-    print(f"\nLoading agent from {logdir} ...")
-    agent, config = load_run(logdir)
-    env = DreamerStallEnv(seed=12345)
-    try:
-        print(f"Running {args.episodes} greedy eval episodes...")
-        episodes = rollout_episodes(agent, env, args.episodes, config.device, progress=False)
-    finally:
-        env.close()
+    # Bypass the training-time curriculum so every scenario gets roughly equal
+    # sampling. Without this, the env would default to phase 0 (cruise only) and
+    # the "per-scenario" summary would only report cruise.
+    # Re-seeded per checkpoint below so both face the same scenario draws.
+    env_seed = 12345
+    for ckpt in args.checkpoint:
+        print(f"\n=== Evaluating {ckpt}.pt ===")
+        print(f"Loading agent from {logdir} ...")
+        agent, config = load_run(logdir, prefer=ckpt)
+        env = DreamerStallEnv(seed=env_seed, disable_curriculum=True)
+        try:
+            print(f"Running {args.episodes} greedy eval episodes from {ckpt}.pt ...")
+            episodes = rollout_episodes(agent, env, args.episodes, config.device, progress=False)
+        finally:
+            env.close()
 
-    with open(out_dir / "eval_episodes.json", "w", encoding="utf-8") as f:
-        json.dump(episodes, f, indent=2)
+        episodes_path = out_dir / f"eval_episodes_{ckpt}.json"
+        with open(episodes_path, "w", encoding="utf-8") as f:
+            json.dump(episodes, f, indent=2)
 
-    summary = summarize_per_scenario(episodes)
-    print("\nPer-scenario summary:")
-    for name in sorted(summary):
-        s = summary[name]
-        n = s["n"]
-        if n == 0:
-            continue
-        med_alt = sorted(s["altitude_loss_ft"])[n // 2]
-        print(
-            f"  {name:20s}  n={n:3d}  success={s['success_rate']*100:5.1f}%  "
-            f"crash={s['crash_rate']*100:5.1f}%  median_alt_loss={med_alt:6.0f}ft"
-        )
+        summary = summarize_per_scenario(episodes)
+        print(f"\nPer-scenario summary ({ckpt}.pt):")
+        for name in sorted(summary):
+            s = summary[name]
+            n = s["n"]
+            if n == 0:
+                continue
+            med_alt = sorted(s["altitude_loss_ft"])[n // 2]
+            print(
+                f"  {name:20s}  n={n:3d}  success={s['success_rate']*100:5.1f}%  "
+                f"crash={s['crash_rate']*100:5.1f}%  median_alt_loss={med_alt:6.0f}ft"
+            )
 
-    plot_recovery_metrics(summary, out_dir / "recovery_metrics.png")
-    print(f"\n  -> {out_dir / 'recovery_metrics.png'}")
-    print(f"  -> {out_dir / 'eval_episodes.json'}")
+        metrics_path = out_dir / f"recovery_metrics_{ckpt}.png"
+        plot_recovery_metrics(summary, metrics_path)
+        print(f"  -> {metrics_path}")
+        print(f"  -> {episodes_path}")
 
 
 if __name__ == "__main__":

@@ -125,16 +125,24 @@ targets:
   airspeed_kcas_min: 150.0      # above this is "recovered" (clean 737, approx)
   roll_deg_tolerance: 10.0
   vertical_speed_fps_min: -50.0 # don't require climbing - just controlled descent
+  # Success quality gate: effective budget is max(max_altitude_loss_ft,
+  # max_altitude_loss_fraction_of_start * start_altitude_ft). The fraction term
+  # lets high-altitude starts use proportionally more of their runway; the
+  # absolute floor keeps low-altitude starts from becoming trivially impossible.
+  max_altitude_loss_ft: 2000.0
+  max_altitude_loss_fraction_of_start: 0.25
 
-# Reward weights. All terms are summed each agent step.
+# Reward weights. Per-step terms are summed each agent step; terminal terms
+# are applied once when the episode ends (crash, success, or truncation).
 reward:
   alpha_penalty_per_deg: 0.05         # negative for alpha above target
-  altitude_loss_penalty_per_ft: 0.001 # penalty per ft below episode-start altitude
-  roll_penalty_per_deg: 0.05          # 10x: prior runs entered spiral dive (roll 100+ deg)
+  altitude_loss_penalty_per_ft: 0.001 # per-step shaping signal (small)
+  altitude_loss_terminal_penalty_per_ft: 0.1 # one-shot at episode end (dominant)
+  roll_penalty_per_deg: 0.05
   airspeed_bonus_per_kt: 0.01         # positive once above stall speed
   control_smoothness_penalty: 0.1     # multiplied by mean |delta action|
   crash_penalty: -100.0
-  success_bonus: 500.0                # 10x: dwarfs survival noise so success is unambiguously good
+  success_bonus: 500.0
   step_alive_bonus: 0.0               # set >0 if you want a survival incentive
 
 # Phased scenario-sampling curriculum.

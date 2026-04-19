@@ -28,10 +28,12 @@ class DreamerStallEnv:
         *,
         flightgear: bool = False,
         curriculum_step_file: str | Path | None = None,
+        disable_curriculum: bool = False,
     ):
         self._env = StallRecoveryEnv(
             flightgear=flightgear,
             curriculum_step_file=curriculum_step_file,
+            disable_curriculum=disable_curriculum,
         )
         self._seed = int(seed)
         self._reset_seed_used = False

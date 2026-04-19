@@ -50,6 +50,7 @@ class StallRecoveryEnv(gym.Env):
         *,
         flightgear: bool = False,
         curriculum_step_file: str | Path | None = None,
+        disable_curriculum: bool = False,
     ):
         super().__init__()
 
@@ -74,7 +75,7 @@ class StallRecoveryEnv(gym.Env):
 
         curriculum_enabled, curriculum_phases = J.parse_curriculum(cfg.get("curriculum"))
         self._curriculum: J.CurriculumSchedule | None = None
-        if curriculum_enabled:
+        if curriculum_enabled and not disable_curriculum:
             step_file = Path(curriculum_step_file) if curriculum_step_file else None
             self._curriculum = J.CurriculumSchedule(curriculum_phases, step_file)
 
@@ -141,16 +142,21 @@ class StallRecoveryEnv(gym.Env):
         self._fdm[P.rudder_cmd]   = float(action[2])
         self._fdm[P.throttle_cmd] = float((action[3] + 1.0) * 0.5)  # [-1,1] -> [0,1]
 
-        # Run sim_dt_hz / agent_dt_hz integration steps per agent step.
+        # Run sim_dt_hz / agent_dt_hz integration steps per agent step. If
+        # fdm.run() ever returns False (ground impact or numerical failure),
+        # treat the episode as crashed: otherwise the loop below would just
+        # keep polling a dead sim until the time-limit truncation fires.
+        sim_failed = False
         for _ in range(self._substeps):
             if not self._fdm.run():
-                # JSBSim asked to stop (e.g. ground impact); treat as crash.
+                sim_failed = True
                 break
 
         obs = self._read_obs()
         raw = self._read_state_raw()
 
-        crashed = raw["altitude_ft"] < self._ground_floor_ft and raw["vspeed_fps"] > 0.0
+        below_floor = raw["altitude_ft"] < self._ground_floor_ft and raw["vspeed_fps"] > 0.0
+        crashed = sim_failed or below_floor
         recovered = self._is_recovered(raw)
         if recovered:
             self._stable_streak += 1
@@ -163,6 +169,14 @@ class StallRecoveryEnv(gym.Env):
         self._step_idx += 1
         terminated = bool(crashed or success)
         truncated = bool(self._step_idx >= self._max_episode_steps)
+
+        # Terminal altitude-loss penalty: one lump at episode end proportional
+        # to total ft lost from start. Keeps the per-step alt term small (pure
+        # gradient signal) while the terminal term carries the real cost of a
+        # deep recovery. Applied on success, crash, and timeout.
+        if terminated or truncated:
+            final_alt_loss = max(0.0, self._start_altitude_ft - raw["altitude_ft"])
+            reward += -self._reward["altitude_loss_terminal_penalty_per_ft"] * final_alt_loss
 
         self._prev_action = action
 
@@ -232,13 +246,22 @@ class StallRecoveryEnv(gym.Env):
 
     # --- Reward / termination ------------------------------------------------
 
+    def _max_altitude_loss_budget_ft(self) -> float:
+        t = self._targets
+        return max(
+            t["max_altitude_loss_ft"],
+            t["max_altitude_loss_fraction_of_start"] * self._start_altitude_ft,
+        )
+
     def _is_recovered(self, raw: dict[str, float]) -> bool:
         t = self._targets
+        altitude_loss = max(0.0, self._start_altitude_ft - raw["altitude_ft"])
         return (
             raw["alpha_deg"] < t["alpha_deg_safe"]
             and abs(np.degrees(raw["roll_rad"])) < t["roll_deg_tolerance"]
             and raw["vc_kts"] > t["airspeed_kcas_min"]
             and -raw["vspeed_fps"] > t["vertical_speed_fps_min"]
+            and altitude_loss < self._max_altitude_loss_budget_ft()
         )
 
     def _compute_reward(

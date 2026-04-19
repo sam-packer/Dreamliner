@@ -75,9 +75,9 @@ PROFILES: dict[str, dict] = {
     },
     "good": {
         "total_steps":      1_000_000,
-        "model_size":       "200M",
+        "model_size":       "100M",
         "action_repeat":    2,
-        "num_envs":         16,
+        "num_envs":         32,
         "eval_episodes":    16,
         "batch_size":       64,
         "batch_length":     64,
@@ -272,9 +272,9 @@ def parse_args() -> argparse.Namespace:
         description="Train DreamerV3 on the 737 stall-recovery env.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Profiles (RTX 5090 timings; action_repeat=2 on both):\n"
-            "  quick   250k steps, 100M model, ~2.7 hr, ~22-25 GB VRAM  (default)\n"
-            "  good    1M steps,   200M model, ~20 hr,  near-max VRAM\n"
+            "Profiles (RTX 5090 + Ryzen 9 9950X3D timings):\n"
+            "  quick   250k steps, 100M model, 16 envs, ~50 min, ~22-25 GB VRAM  (default)\n"
+            "  good    1M steps,   100M model, 32 envs, ~4 hr,   ~22-25 GB VRAM\n"
         ),
     )
     p.add_argument("--profile", choices=list(PROFILES), default="quick",
