@@ -16,7 +16,9 @@ import argparse
 import functools
 import json
 import logging
+import os
 import shutil
+import subprocess
 import sys
 import time
 import warnings
@@ -115,6 +117,72 @@ def _setup_logging(level: int = logging.INFO) -> None:
 
 
 # ----------------------------------------------------------------------------
+# MSVC environment setup (Windows only)
+# ----------------------------------------------------------------------------
+# torch.compile's Inductor C++ codegen shells out to cl.exe when it falls off
+# the Triton-only fast path. Windows shipped VS Build Tools doesn't put cl.exe
+# on PATH unless you launch from a Developer Command Prompt, which defeats
+# "double-click train and walk away". We run vcvars64.bat once at startup and
+# graft its env into our process so torch.compile just works from plain
+# PowerShell. No-op on Linux/Mac.
+
+def _find_vcvars64() -> Path | None:
+    vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+    if vswhere.exists():
+        try:
+            out = subprocess.check_output(
+                [str(vswhere), "-latest", "-products", "*", "-property", "installationPath"],
+                text=True,
+            ).strip()
+            if out:
+                candidate = Path(out) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+                if candidate.exists():
+                    return candidate
+        except (subprocess.CalledProcessError, OSError):
+            pass
+    for root in (r"C:\Program Files (x86)\Microsoft Visual Studio",
+                 r"C:\Program Files\Microsoft Visual Studio"):
+        for edition in ("BuildTools", "Community", "Professional", "Enterprise"):
+            p = Path(root) / "2022" / edition / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+            if p.exists():
+                return p
+    return None
+
+
+def _ensure_msvc_env_on_windows() -> None:
+    if sys.platform != "win32":
+        return
+    if shutil.which("cl.exe"):
+        log.info("MSVC cl.exe already on PATH; skipping vcvars64 setup.")
+        return
+    vcvars = _find_vcvars64()
+    if vcvars is None:
+        log.warning(
+            "MSVC cl.exe not on PATH and no VS 2022 install found. torch.compile "
+            "may fall back to eager for some ops. Install VS 2022 Build Tools to fix."
+        )
+        return
+    try:
+        proc = subprocess.run(
+            f'"{vcvars}" >nul && set',
+            shell=True, capture_output=True, text=True, check=True,
+            encoding="mbcs", errors="replace",
+        )
+    except subprocess.CalledProcessError as e:
+        log.warning("vcvars64.bat failed (rc=%s); torch.compile may degrade.", e.returncode)
+        return
+    updated = 0
+    for line in proc.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if os.environ.get(key) != value:
+            os.environ[key] = value
+            updated += 1
+    log.info("Loaded MSVC env from %s (%d vars updated)", vcvars, updated)
+
+
+# ----------------------------------------------------------------------------
 # Env factory (module-level so it survives subprocess spawn on Windows).
 # ----------------------------------------------------------------------------
 
@@ -138,7 +206,13 @@ def build_config(profile: dict, logdir: Path) -> OmegaConf:
     base_model = OmegaConf.load(_VENDOR_ROOT / "configs" / "model" / "_base_.yaml")
     size_model = OmegaConf.load(_VENDOR_ROOT / "configs" / "model" / f"size{profile['model_size']}.yaml")
     model = OmegaConf.merge(base_model, size_model)
-    model.compile = False  # triton has no Windows wheels; Linux users can edit here.
+    # torch.compile wraps _cal_grad with mode="reduce-overhead" (see vendor/r2dreamer/
+    # dreamer.py:161). ~30-50% speedup once warm. Windows needs `triton-windows`
+    # (installed via uv) plus MSVC's cl.exe on PATH: if launching from plain
+    # PowerShell, run from "x64 Native Tools Command Prompt for VS 2022", or call
+    # vcvars64.bat first. First compile of the graph is slow (1-5 min); subsequent
+    # runs hit the cache at %USERPROFILE%\.triton\cache.
+    model.compile = True
 
     env = OmegaConf.create({
         "task":             "dreamliner_stall_recovery",
@@ -220,6 +294,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     _setup_logging()
+    _ensure_msvc_env_on_windows()
 
     profile = PROFILES[args.profile]
     run_name = args.run_name or f"run-{int(time.time())}"

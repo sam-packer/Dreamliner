@@ -31,7 +31,9 @@ uv sync
 uv run python -c "import torch; print(torch.cuda.get_device_name(0))"
 ```
 
-`uv sync` installs everything including a CUDA 13 build of PyTorch (`torch==2.11.0+cu130`) via the configured `pytorch-cu130` index. The `r2dreamer` source lives under `vendor/r2dreamer/` (cloned from NM512's repo at first project setup) and is added to `sys.path` at runtime rather than installed. None of its env-suite-specific deps (mujoco, dm_control, atari, crafter, etc.) are needed.
+`uv sync` installs everything including a CUDA 13 build of PyTorch (`torch==2.11.0+cu130`) via the configured `pytorch-cu130` index, plus `triton-windows` so `torch.compile` works on Windows. The `r2dreamer` source lives under `vendor/r2dreamer/` (cloned from NM512's repo at first project setup) and is added to `sys.path` at runtime rather than installed. None of its env-suite-specific deps (mujoco, dm_control, atari, crafter, etc.) are needed.
+
+For full `torch.compile` coverage on Windows, install **Visual Studio 2022 Build Tools** with the "Desktop development with C++" workload. `train.py` auto-detects it and sources `vcvars64.bat` at startup so `cl.exe` lands on PATH for Inductor's C++ codegen. Without Build Tools, compile still works via the Triton-only path but some ops fall back to eager mode and you lose part of the speedup.
 
 ## Commands
 
@@ -240,6 +242,7 @@ pyproject.toml                  # deps, scripts, CUDA 13 torch index
 - **Engine startup**: every reset calls `fdm.get_propulsion().init_running(-1)` so thrust is available immediately rather than spooling up over several seconds.
 - **JSBSim reset**: in-place reset across very different ICs is unreliable, so the env rebuilds `FGFDMExec` on every `reset()`. Construction is cheap (sub-second).
 - **JAX on Windows**: not an option for GPU. JAX has no Windows GPU wheels (cu12 or cu13). The official `danijar/dreamerv3` would require WSL2; we use NM512's PyTorch reproduction instead.
+- **torch.compile on Windows**: enabled by default (`model.compile = True` in `build_config`). r2dreamer wraps `_cal_grad` with `torch.compile(mode="reduce-overhead")`; expected wall-clock improvement is ~30-50% once the graph is warm. First compile is slow (1-5 min cold, no tqdm progress during that window) and caches under `%USERPROFILE%\.triton\cache` for subsequent runs. Prereqs are `triton-windows` (pulled in by `uv sync`) and VS 2022 Build Tools; `train.py` auto-sources `vcvars64.bat` so you don't need to launch from a Developer Command Prompt. If the cache path is a problem on constrained home dirs, set `TRITON_CACHE_DIR=C:\triton-cache` before running. Set `model.compile = False` to disable for debugging.
 - **`uv run` rebuild lock on Windows**: `uv run train` and `uv add` rebuild the project wheel, which tries to replace `train.exe` in the venv. If another `train` is still running, that file is locked and the invocation errors with `The process cannot access the file because it is being used by another process`. Fix: Ctrl+C the running training (the next `latest.pt` has already been saved), then re-run.
 
 ## What is coming next
