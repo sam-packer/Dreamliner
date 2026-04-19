@@ -1,0 +1,51 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.Python
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Package management ---
+.python-version
+
+# --- IDEs ---
+.idea/
+.vscode/
+*.iml
+*.code-workspace
+
+# --- Testing / linting caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Secrets / local env ---
+.env
+.env.*
+!.env.example
+
+# --- Training outputs (large: checkpoints, TB events, replay snapshots) ---
+runs/
+
+# --- Transient files (e.g. curriculum_step.tmp left behind on crash) ---
+*.tmp

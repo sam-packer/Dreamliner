@@ -1,0 +1,222 @@
+env:
+  aircraft: "737"
+  sim_dt_hz: 120
+  agent_dt_hz: 10
+  max_episode_seconds: 60.0
+  ground_floor_ft: 1000.0
+  success_hold_seconds: 5.0
+
+# Scenario pool. Each scenario has IC ranges; actual ICs are sampled per-episode.
+# Sampling weights come from the `curriculum` block below (or uniform if disabled).
+# Scenarios are ordered roughly easiest -> hardest. The "safe" scenarios are
+# designed so each one rehearses a specific skill the agent needs for stall
+# recovery, in a calm regime where it can't actually get into trouble:
+#   cruise          = equilibrium baseline (do nothing drastic)
+#   gentle_turn     = roll-out to wings level (turning-stall precursor)
+#   pitch_recovery  = forward-stick reflex at elevated pitch/alpha
+#   slow_flight     = control at stall-adjacent airspeeds (not actually stalled)
+# The upsets are the real tasks:
+#   high_alpha_entry, wings_level_stall, turning_stall, nose_high_upset,
+#   incipient_spin
+scenarios:
+  cruise:
+    weight: 1.0
+    altitude_ft:    [8000.0, 15000.0]
+    airspeed_kcas:  [220.0,  260.0]    # well above stall
+    alpha_deg:      [0.0,    4.0]      # normal cruise alpha
+    pitch_deg:      [-2.0,   4.0]
+    roll_deg:       [-3.0,   3.0]      # wings level
+    beta_deg:       [-0.5,   0.5]
+    yaw_rate_dps:   [-0.5,   0.5]
+    throttle:       [0.5,    0.7]
+
+  gentle_turn:
+    weight: 1.0
+    altitude_ft:    [8000.0, 15000.0]
+    airspeed_kcas:  [200.0,  250.0]
+    alpha_deg:      [2.0,    6.0]
+    pitch_deg:      [-1.0,   5.0]
+    roll_deg:       [-30.0,  30.0]     # roll-out-to-level practice, both directions
+    beta_deg:       [-1.0,   1.0]
+    yaw_rate_dps:   [-3.0,   3.0]
+    throttle:       [0.5,    0.7]
+
+  pitch_recovery:
+    weight: 1.0
+    altitude_ft:    [8000.0, 15000.0]
+    airspeed_kcas:  [180.0,  220.0]
+    alpha_deg:      [5.0,    9.0]      # elevated, not stalled (stall ~12 deg)
+    pitch_deg:      [10.0,   25.0]     # nose-high; agent must push down
+    roll_deg:       [-3.0,   3.0]      # isolate the pitch skill
+    beta_deg:       [-1.0,   1.0]
+    yaw_rate_dps:   [-2.0,   2.0]
+    throttle:       [0.4,    0.7]
+
+  slow_flight:
+    weight: 1.0
+    altitude_ft:    [5000.0, 15000.0]
+    airspeed_kcas:  [140.0,  180.0]    # bridges cruise -> stall regime
+    alpha_deg:      [4.0,    8.0]
+    pitch_deg:      [0.0,    5.0]
+    roll_deg:       [-5.0,   5.0]
+    beta_deg:       [-1.0,   1.0]
+    yaw_rate_dps:   [-1.0,   1.0]
+    throttle:       [0.3,    0.6]
+
+  high_alpha_entry:
+    weight: 1.0
+    altitude_ft:    [5000.0, 25000.0]
+    airspeed_kcas:  [110.0,  170.0]
+    alpha_deg:      [10.0,   18.0]
+    pitch_deg:      [15.0,   30.0]
+    roll_deg:       [-10.0,  10.0]
+    beta_deg:       [-2.0,   2.0]
+    yaw_rate_dps:   [-5.0,   5.0]
+    throttle:       [0.2,    0.6]
+
+  wings_level_stall:
+    weight: 1.0
+    altitude_ft:    [5000.0, 25000.0]
+    airspeed_kcas:  [95.0,   140.0]
+    alpha_deg:      [13.0,   20.0]
+    pitch_deg:      [5.0,    15.0]
+    roll_deg:       [-5.0,   5.0]
+    beta_deg:       [-1.0,   1.0]
+    yaw_rate_dps:   [-2.0,   2.0]
+    throttle:       [0.1,    0.4]
+
+  turning_stall:
+    weight: 1.0
+    altitude_ft:    [5000.0, 25000.0]
+    airspeed_kcas:  [130.0,  180.0]
+    alpha_deg:      [10.0,   16.0]
+    pitch_deg:      [5.0,    15.0]
+    roll_deg:       [20.0,   60.0]    # |roll|; sign is randomized in code
+    beta_deg:       [-3.0,   3.0]
+    yaw_rate_dps:   [-8.0,   8.0]
+    throttle:       [0.3,    0.7]
+
+  nose_high_upset:
+    weight: 1.0
+    altitude_ft:    [8000.0, 25000.0]
+    airspeed_kcas:  [80.0,   130.0]
+    alpha_deg:      [12.0,   22.0]
+    pitch_deg:      [30.0,   60.0]
+    roll_deg:       [-20.0,  20.0]
+    beta_deg:       [-3.0,   3.0]
+    yaw_rate_dps:   [-5.0,   5.0]
+    throttle:       [0.0,    0.3]
+
+  incipient_spin:
+    weight: 1.0
+    altitude_ft:    [5000.0, 25000.0]
+    airspeed_kcas:  [100.0,  150.0]
+    alpha_deg:      [15.0,   22.0]
+    pitch_deg:      [5.0,    20.0]
+    roll_deg:       [-30.0,  30.0]
+    beta_deg:       [-10.0,  10.0]
+    yaw_rate_dps:   [10.0,   25.0]    # signed in code
+    throttle:       [0.1,    0.5]
+
+# Targets used by the reward / success criteria.
+targets:
+  alpha_deg_safe: 10.0          # below this alpha is "out of stall"
+  alpha_deg_threshold: 12.0     # shaped reward target
+  airspeed_kcas_min: 150.0      # above this is "recovered" (clean 737, approx)
+  roll_deg_tolerance: 10.0
+  vertical_speed_fps_min: -50.0 # don't require climbing - just controlled descent
+
+# Reward weights. All terms are summed each agent step.
+reward:
+  alpha_penalty_per_deg: 0.05         # negative for alpha above target
+  altitude_loss_penalty_per_ft: 0.001 # penalty per ft below episode-start altitude
+  roll_penalty_per_deg: 0.05          # 10x: prior runs entered spiral dive (roll 100+ deg)
+  airspeed_bonus_per_kt: 0.01         # positive once above stall speed
+  control_smoothness_penalty: 0.1     # multiplied by mean |delta action|
+  crash_penalty: -100.0
+  success_bonus: 500.0                # 10x: dwarfs survival noise so success is unambiguously good
+  step_alive_bonus: 0.0               # set >0 if you want a survival incentive
+
+# Phased scenario-sampling curriculum.
+# Idea: each safe scenario rehearses a specific stall-recovery skill in calm
+# conditions; upsets progressively harden; the hardest scenarios get the most
+# practice at the end.
+#   Phase 0 (   0-  20k): cruise only. Learn basic control + equilibrium.
+#   Phase 1 ( 20k-  60k): all 4 safe scenarios. Practice each recovery skill
+#                         (roll-out, forward-stick, slow-speed control) in a
+#                         regime where the agent can't actually stall/crash.
+#   Phase 2 ( 60k- 170k): add all upset scenarios; keep minority weight on safe
+#                         scenarios to preserve baseline skills (anti-forgetting).
+#   Phase 3 (170k- 250k): specialize on the upsets the 250k uniform run struggled
+#                         with (turning_stall, nose_high_upset). Retain a sliver
+#                         of easier scenarios so the policy doesn't drift.
+# Notes:
+#   - Weights are renormalized; only relative values matter. 0.0 excludes a scenario.
+#   - Step boundaries are tuned for the "quick" profile (250k). For "good" (1M),
+#     scale all start_steps by ~4x.
+#   - Set enabled: false to restore pure uniform sampling.
+curriculum:
+  enabled: true
+  phases:
+    # Phase 0 - cruise only: learn to fly stably.
+    - start_step: 0
+      weights:
+        cruise:            1.0
+        gentle_turn:       0.0
+        pitch_recovery:    0.0
+        slow_flight:       0.0
+        high_alpha_entry:  0.0
+        wings_level_stall: 0.0
+        turning_stall:     0.0
+        nose_high_upset:   0.0
+        incipient_spin:    0.0
+    # Phase 1 - rehearse each stall-recovery skill in a safe regime.
+    - start_step: 20000
+      weights:
+        cruise:            1.0
+        gentle_turn:       1.0
+        pitch_recovery:    1.0
+        slow_flight:       1.0
+        high_alpha_entry:  0.0
+        wings_level_stall: 0.0
+        turning_stall:     0.0
+        nose_high_upset:   0.0
+        incipient_spin:    0.0
+    # Phase 2 - full mix; upsets dominate but safe skills stay in the buffer.
+    - start_step: 60000
+      weights:
+        cruise:            0.25
+        gentle_turn:       0.25
+        pitch_recovery:    0.25
+        slow_flight:       0.25
+        high_alpha_entry:  1.0
+        wings_level_stall: 1.0
+        turning_stall:     1.0
+        nose_high_upset:   1.0
+        incipient_spin:    1.0
+    # Phase 3 - specialize on hardest upsets.
+    - start_step: 170000
+      weights:
+        cruise:            0.1
+        gentle_turn:       0.1
+        pitch_recovery:    0.1
+        slow_flight:       0.1
+        high_alpha_entry:  0.7
+        wings_level_stall: 0.7
+        turning_stall:     1.5
+        nose_high_upset:   1.5
+        incipient_spin:    0.3
+
+# Observation normalization scales (divide raw by these).
+obs_scales:
+  alpha_deg: 30.0
+  beta_deg: 20.0
+  pitch_rad: 1.5708               # pi/2
+  roll_rad: 3.1416                # pi
+  vc_kts: 300.0
+  altitude_ft: 30000.0
+  rate_rad_sec: 3.1416
+  load_factor_g: 5.0
+  throttle: 1.0
+  surface_pos: 1.0
+  vspeed_fps: 200.0
