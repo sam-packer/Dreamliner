@@ -1,7 +1,7 @@
 """DreamerV3 training on StallRecoveryEnv.
 
     uv run train                                       # quick profile (~2.7 hr)
-    uv run train --profile good                        # good profile (~16 hr)
+    uv run train --profile good                        # good profile (~20 hr)
     uv run train --run-name baseline                   # custom output dir name
     uv run train --resume-from runs/dreamer/prior --run-name continued
 

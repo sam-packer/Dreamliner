@@ -20,7 +20,7 @@ r2dreamer (vendored PyTorch DreamerV3 reproduction by NM512)
 RTX 5090 / CUDA 13 / torch 2.11+cu130
 ```
 
-JSBSim runs **in-process** through its Python bindings — no network round-trip during training. The vendored DreamerV3 implementation is NM512's [r2dreamer](https://github.com/NM512/r2dreamer) (newer + faster than the older `dreamerv3-torch`); the official danijar/dreamerv3 is JAX-only and JAX has no Windows GPU wheels, so PyTorch is the path on this stack.
+JSBSim runs **in-process** through its Python bindings (no network round-trip during training). The vendored DreamerV3 implementation is NM512's [r2dreamer](https://github.com/NM512/r2dreamer) (newer and faster than the older `dreamerv3-torch`); the official danijar/dreamerv3 is JAX-only and JAX has no Windows GPU wheels, so PyTorch is the path on this stack.
 
 ## Setup
 
@@ -31,7 +31,7 @@ uv sync
 uv run python -c "import torch; print(torch.cuda.get_device_name(0))"
 ```
 
-`uv sync` installs everything including a CUDA 13 build of PyTorch (`torch==2.11.0+cu130`) via the configured `pytorch-cu130` index. The `r2dreamer` source lives under `vendor/r2dreamer/` (cloned from NM512's repo at first project setup) and is added to `sys.path` at runtime rather than installed — none of its env-suite-specific deps (mujoco, dm_control, atari, crafter, etc.) are needed.
+`uv sync` installs everything including a CUDA 13 build of PyTorch (`torch==2.11.0+cu130`) via the configured `pytorch-cu130` index. The `r2dreamer` source lives under `vendor/r2dreamer/` (cloned from NM512's repo at first project setup) and is added to `sys.path` at runtime rather than installed. None of its env-suite-specific deps (mujoco, dm_control, atari, crafter, etc.) are needed.
 
 ## Commands
 
@@ -41,7 +41,7 @@ Four commands. Each defaults to "do the obvious thing" and auto-discovers the mo
 
 ```bash
 uv run train                                           # quick profile (~2.7 hr)
-uv run train --profile good                            # good profile (~16 hr)
+uv run train --profile good                            # good profile (~20 hr)
 uv run train --run-name baseline                       # custom output dir name
 uv run train --resume-from runs/dreamer/prior --run-name continued
 ```
@@ -53,11 +53,11 @@ Two profiles (RTX 5090 timings; both use `action_repeat=2`):
 | `quick` | 250 k | 100 M | ~2.7 hr    | 22–25 GB  |
 | `good`  | 1 M   | 200 M | ~20 hr     | near-max  |
 
-`action_repeat=2` means the agent decides every 200 ms of sim time (vs 100 ms without it) — halves the required agent decisions to cover the same env duration. Matches the DreamerV3 norm for proprio / DMC-style tasks and stays well inside a human reaction-time envelope for stall recovery.
+`action_repeat=2` means the agent decides every 200 ms of sim time (vs 100 ms without it), which halves the required agent decisions to cover the same env duration. Matches the DreamerV3 norm for proprio / DMC-style tasks and stays well inside a human reaction-time envelope for stall recovery.
 
-Tuning knobs (batch size, train ratio, buffer size, eval cadence, etc.) live in the `PROFILES` dict in `src/dreamliner/training/train.py` — edit there if you need something off-menu.
+Tuning knobs (batch size, train ratio, buffer size, eval cadence, etc.) live in the `PROFILES` dict in `src/dreamliner/training/train.py`. Edit there if you need something off-menu.
 
-Outputs land under `runs/dreamer/<run-name>/`. `latest.pt` is saved every 10 k env steps, on clean exit, **and on Ctrl+C** — interrupts don't lose the model. `best.pt` is saved whenever eval score improves, with a `best.json` sidecar (step, score, timestamp). `play` and `evaluate` load `best.pt` by default and fall back to `latest.pt`.
+Outputs land under `runs/dreamer/<run-name>/`. `latest.pt` is saved every 10 k env steps, on clean exit, **and on Ctrl+C** (interrupts don't lose the model). `best.pt` is saved whenever eval score improves, with a `best.json` sidecar (step, score, timestamp). `play` and `evaluate` load `best.pt` by default and fall back to `latest.pt`.
 
 `--resume-from` loads weights only; optimizer state and replay buffer are rebuilt fresh. This is simpler than snapshotting the ~12 GB GPU replay buffer and works fine for the "kill a run, extend it later" iteration loop.
 
@@ -89,9 +89,9 @@ uv run evaluate --no-eval                              # plots only, skip rollou
 
 Outputs land under `<logdir>/analysis/`:
 
-- `learning_curves.png` — eval/train scalars from TensorBoard
-- `recovery_metrics.png` — altitude-loss / length / success-rate histograms per scenario
-- `eval_episodes.json` — raw per-episode trajectory log
+- `learning_curves.png`: eval/train scalars from TensorBoard
+- `recovery_metrics.png`: altitude-loss / length / success-rate histograms per scenario
+- `eval_episodes.json`: raw per-episode trajectory log
 
 ### FlightGear
 
@@ -106,7 +106,7 @@ JSBSim drives the actual flight dynamics; the FG aircraft is only what you see o
 
 ## FlightGear setup (one-time, ~5 min)
 
-Install [FlightGear](https://www.flightgear.org/download/) separately (not a pip dependency). We auto-discover `fgfs` across the standard install locations (`C:\Program Files\FlightGear*\bin\fgfs.exe`, `/usr/games/fgfs`, `/Applications/FlightGear.app/...`) — no need to add it to PATH.
+Install [FlightGear](https://www.flightgear.org/download/) separately (not a pip dependency). We auto-discover `fgfs` across the standard install locations (`C:\Program Files\FlightGear*\bin\fgfs.exe`, `/usr/games/fgfs`, `/Applications/FlightGear.app/...`). No need to add it to PATH.
 
 The default FG install only ships with the Cessna 172P; the 737-300 visual has to be downloaded once:
 
@@ -122,19 +122,30 @@ If FG 2024.1's catalog isn't pre-configured for some reason: in step 4, click **
 
 ## Environment
 
-`StallRecoveryEnv` randomly initialises the 737 in one of five stall scenarios per episode and asks the policy to recover with minimum altitude loss.
+`StallRecoveryEnv` initialises the 737 in one of eight scenarios per episode and asks the policy to keep it flying (or get it back to flying). Four "safe" scenarios teach the component skills that stall recovery needs; the other four (plus the original `incipient_spin`) are the actual upset / recovery tasks.
 
 **Scenarios** (defined in `configs/default.yaml`):
+
+Safe scenarios, used early in training to teach recovery skills in a regime where the plane can't actually stall:
+
+| name             | description                                              |
+|------------------|----------------------------------------------------------|
+| `cruise`         | wings-level at 220-260 KCAS, just hold it there          |
+| `gentle_turn`    | ±30° bank, agent rolls out to wings-level                |
+| `pitch_recovery` | nose-up 10-25° with elevated but sub-stall alpha         |
+| `slow_flight`    | 140-180 KCAS in level flight, low-speed handling         |
+
+Upset scenarios (the actual recovery tasks):
 
 | name                | description                                                |
 |---------------------|------------------------------------------------------------|
 | `high_alpha_entry`  | nose-up attitude, decaying airspeed, approaching stall AoA |
 | `wings_level_stall` | classic low-speed wings-level stall                        |
-| `turning_stall`     | banked-turn stall (20–60 deg bank)                         |
-| `nose_high_upset`   | extreme pitch (30–60 deg) with low airspeed                |
+| `turning_stall`     | banked-turn stall (20-60° bank)                            |
+| `nose_high_upset`   | extreme pitch (30-60°) with low airspeed                   |
 | `incipient_spin`    | high AoA with significant yaw rate                         |
 
-Initial conditions (altitude 5–25 kft, airspeed, alpha, pitch, roll, beta, yaw rate, throttle) are sampled per-episode from per-scenario ranges in the YAML.
+Initial conditions (altitude, airspeed, alpha, pitch, roll, beta, yaw rate, throttle) are sampled per-episode from per-scenario ranges in the YAML. See the [Curriculum](#curriculum) section below for how sampling weights shift across training.
 
 **Observation** (Dict, with a single `state` key for `mlp_keys=state` on Dreamer):
 
@@ -157,13 +168,41 @@ The 15-dim normalized state vector: alpha, beta, pitch, roll, calibrated airspee
 - bonus for airspeed above stall speed
 - penalty for jerky control inputs (smoothness regularizer)
 - one-shot **-100** on crash (alt < 1000 ft and descending)
-- one-shot **+50** when stable flight is held for 5 s
+- one-shot **+500** when stable flight is held for 5 s
 
 All weights live in `configs/default.yaml` under `reward:` and `targets:`.
 
 **Termination**: crash, sustained recovery (5 s), or 60 s timeout.
 
 **Timing**: JSBSim integrates at 120 Hz; the agent acts at 10 Hz, so each `env.step()` runs 12 JSBSim substeps.
+
+## Curriculum
+
+Before we added curriculum learning, every episode was a stall or an upset. The agent had to learn "how to fly" and "how to recover from bad states" at the same time. A uniform-sampling 250 k run peaked at +306 eval with spotty per-scenario performance (`turning_stall` was 0/1 in a spot-check; `nose_high_upset` was 1/2).
+
+The curriculum splits training into four phases so the agent learns in a sensible order: hold stable flight, practice the maneuvers that recovery actually needs, then do recovery.
+
+| phase | env steps     | what the agent sees                   | what it learns                                    |
+|-------|---------------|---------------------------------------|---------------------------------------------------|
+| 0     | 0 - 20 k      | `cruise` only                         | basic stability and positive reward signal        |
+| 1     | 20 k - 60 k   | all 4 safe scenarios                  | roll-out, forward-stick, low-speed control       |
+| 2     | 60 k - 170 k  | full mix, upsets ~83% of samples      | stall recovery; safe skills stay in replay       |
+| 3     | 170 k - 250 k | weighted toward hardest upsets        | specialize on `turning_stall`, `nose_high_upset` |
+
+Each safe scenario targets one component of stall recovery:
+
+- `cruise` is the equilibrium baseline. The main thing it teaches is that doing nothing aggressive is fine when nothing is wrong.
+- `gentle_turn` starts the plane banked up to 30° in either direction. Agent has to roll out to wings-level. Precursor to `turning_stall` minus the stall.
+- `pitch_recovery` starts the plane nose-up at 10 to 25° with alpha elevated but below stall AoA. The forward-stick reflex is the single most important stall-recovery input; this practices it in conditions where the plane won't actually stall.
+- `slow_flight` runs at 140 to 180 KCAS in otherwise calm conditions. There's a big airspeed gap between cruise scenarios (220+ KCAS) and stall scenarios (80-180 KCAS). Without `slow_flight` the agent would hit stall-regime airspeeds for the first time during an actual upset, which is a bad time to be figuring out low-speed control.
+
+### How it works
+
+The trainer writes the current global step to `runs/<run>/_curriculum_step.txt` every 5 k steps (atomic replace, so env subprocesses never read a half-written file). Every env reads that file on episode reset and picks weights from whichever phase is active. One shared file, no IPC, no subprocess synchronization. Works on Windows spawn without any special handling.
+
+### Knobs
+
+Set `curriculum.enabled: false` in `configs/default.yaml` for uniform sampling (the pre-curriculum baseline). The `curriculum.phases` block takes a `start_step` and a `weights` dict per phase. Step boundaries are tuned for the `quick` profile (250 k); for `good` (1 M), scale the boundaries by about 4x. Weights are renormalized per phase, so only relative values matter; a weight of 0 excludes that scenario from the phase entirely.
 
 ## Configuration
 
@@ -195,7 +234,7 @@ pyproject.toml                  # deps, scripts, CUDA 13 torch index
 
 ## Notes and gotchas
 
-- **JSBSim XML input sockets**: the bundled `737.xml` declares two listening input sockets (telnet 5137, QTJSBSIM 5139). With multiple parallel envs — or in any process where one already binds them — subsequent FDMs spam `Could not bind to TCP/UDP input socket`. We copy the aircraft dir to a per-process temp location and strip those declarations once. See `dreamliner.utils.jsbsim_utils:_patched_aircraft_path`.
+- **JSBSim XML input sockets**: the bundled `737.xml` declares two listening input sockets (telnet 5137, QTJSBSIM 5139). With multiple parallel envs (or any other process where one already binds them), subsequent FDMs spam `Could not bind to TCP/UDP input socket`. We copy the aircraft dir to a per-process temp location and strip those declarations once. See `dreamliner.utils.jsbsim_utils:_patched_aircraft_path`.
 - **737 model approximation**: JSBSim's bundled 737 is built from public data, not Boeing proprietary. Stall behaviour is approximate but adequate for research. Swap to `c172p` in the YAML if you want better-validated stall characteristics.
 - **Aileron position**: the 737 model exposes `fcs/left-aileron-pos-norm` and `fcs/right-aileron-pos-norm` but not a combined `fcs/aileron-pos-norm`. The env averages them.
 - **Engine startup**: every reset calls `fdm.get_propulsion().init_running(-1)` so thrust is available immediately rather than spooling up over several seconds.
@@ -205,5 +244,6 @@ pyproject.toml                  # deps, scripts, CUDA 13 torch index
 
 ## What is coming next
 
-1. Latent-space visualization (t-SNE / UMAP of RSSM stoch+deter colored by stall phase) — the "what did the world model learn" research figure.
-2. Reward / scenario tuning based on the per-scenario recovery metrics from `evaluate`.
+1. Latent-space visualization (t-SNE / UMAP of RSSM stoch+deter colored by stall phase). The "what did the world model learn" research figure.
+2. Per-scenario eval logging during training (not just aggregate eval score) so the curriculum can be tuned on real data instead of a 5-episode play rollout.
+3. Reward shaping experiments once we have per-scenario curves to compare.
