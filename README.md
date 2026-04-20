@@ -56,37 +56,43 @@ Four commands. Each defaults to "do the obvious thing" and auto-discovers the mo
 ### Train
 
 ```bash
-uv run train                                           # quick profile (~50 min)
-uv run train --profile good                            # good profile (~4 hr)
+uv run train                                           # quick profile (~1.5-2 hr)
+uv run train --profile good                            # good profile (~7-8 hr)
+uv run train --profile best                            # best profile (~35-40 hr)
 uv run train --run-name baseline                       # custom output dir name
 uv run train --resume-from runs/dreamer/prior --run-name continued
 ```
 
-Two profiles (RTX 5090 + Ryzen 9 9950X3D timings):
+Three profiles (RTX 5090 + Ryzen 9 9950X3D timings):
 
-| profile | steps | model | envs | wall-clock | VRAM     |
-|---------|-------|-------|------|------------|----------|
-| `quick` | 250 k | 100 M | 16   | ~50 min    | 22–25 GB |
-| `good`  | 1 M   | 100 M | 32   | ~3.5 hrs   | 22–25 GB |
+| profile | steps | model | envs | wall-clock  | VRAM     |
+|---------|-------|-------|------|-------------|----------|
+| `quick` | 250 k | 100 M | 16   | 50 minutes  | 22-25 GB |
+| `good`  | 1 M   | 100 M | 32   | ~3.3 hours  | 22-25 GB |
+| `best`  | 5 M   | 100 M | 32   | ~17.5 hours | 22-25 GB |
 
 `good` is `quick` extended: same model, same VRAM load, 4× more environment steps and 2× the parallel env workers to
 saturate both GPU compute and CPU physics threads. For state-based tasks at this scale (15-dim obs, 4-dim action), more
-data dominates more model capacity — a 200M model variant exists but didn't justify its 2× compute cost here.
+data dominates more model capacity — a 200M model variant exists but didn't justify its 2× compute cost here. `best`
+keeps the same 100M model and the same batch/env settings as `good` so VRAM stays in the same band on a 5090; it only
+extends the step budget and scales eval/log/checkpoint cadence so the run stays manageable.
 
-`action_repeat=2` appears in the trainer config but is **display-only** in this codebase — our custom env isn't wrapped
-with an action-repeat wrapper (only the DMC/Atari/metaworld envs in `vendor/r2dreamer/envs/` are). The policy decides
-every physical env step (100 ms of sim time). The setting just multiplies the step counter shown in TensorBoard by 2,
-so "step 210k" in logs means 105k real policy decisions.
+`action_repeat` is intentionally set to `1` for this env. The custom JSBSim task is not wrapped with an action-repeat
+wrapper, so one logged step now means one real policy decision (100 ms of sim time).
 
 Tuning knobs (batch size, train ratio, buffer size, eval cadence, etc.) live in the `PROFILES` dict in
 `src/dreamliner/training/train.py`. Edit there if you need something off-menu.
 
 Outputs land under `runs/dreamer/<run-name>/`. `latest.pt` is saved every 10 k env steps, on clean exit, **and on Ctrl+C
-** (interrupts don't lose the model). `best.pt` is saved whenever eval score improves, with a `best.json` sidecar (step,
-score, timestamp). `play` and `evaluate` load `best.pt` by default and fall back to `latest.pt`.
+** (interrupts don't lose the model). `best.pt` is saved whenever the fixed no-curriculum validation suite improves on
+a deterministic, per-scenario validation sweep, with a `best.json` sidecar (step, validation metrics, timestamp). Each
+run also snapshots its exact env config to
+`env_config.yaml`, and `play` / `evaluate` rebuild from that snapshot rather than whatever happens to be in
+`configs/default.yaml` later.
 
-`--resume-from` loads weights only; optimizer state and replay buffer are rebuilt fresh. This is simpler than
-snapshotting the ~12 GB GPU replay buffer and works fine for the "kill a run, extend it later" iteration loop.
+`--resume-from` restores weights plus optimizer/scheduler/scaler state into a new run, keeps the global step /
+curriculum position, and treats the selected profile as an **additional** training block. The replay buffer is still
+rebuilt fresh; snapshotting the ~12 GB GPU buffer isn't worth the complexity for this iteration loop.
 
 ### Play
 
@@ -207,11 +213,11 @@ to [0, 1] before being sent to JSBSim.
 **Reward** (per agent step unless marked terminal):
 
 - penalty for alpha above the safe threshold
-- small per-step penalty for altitude lost from episode start (shaping signal)
+- small per-step penalty for incremental altitude loss (shaping signal)
 - penalty for roll away from wings-level
 - bonus for airspeed above stall speed
 - penalty for jerky control inputs (smoothness regularizer)
-- **terminal** one-shot penalty at episode end proportional to final ft lost from start (dominant altitude-loss cost)
+- **terminal** one-shot penalty at episode end proportional to final ft lost from start on failed episodes
 - **terminal** one-shot **-100** on crash
 - **terminal** one-shot **+500** when stable flight is held for 5 s
 
@@ -268,15 +274,17 @@ special handling.
 ### Knobs
 
 Set `curriculum.enabled: false` in `configs/default.yaml` for uniform sampling (the pre-curriculum baseline). The
-`curriculum.phases` block takes a `start_step` and a `weights` dict per phase. Step boundaries are tuned for the `quick`
-profile (250 k); for `good` (1 M), scale the boundaries by about 4x. Weights are renormalized per phase, so only
-relative values matter; a weight of 0 excludes that scenario from the phase entirely.
+`curriculum.phases` block takes a `start_step` and a `weights` dict per phase. The checked-in boundaries are tuned for
+the `quick` profile (250 k); training snapshots an `env_config.yaml` per run and automatically scales those boundaries
+for longer profiles such as `good` (1 M). Weights are renormalized per phase, so only relative values matter; a weight
+of 0 excludes that scenario from the phase entirely.
 
 ## Configuration
 
 `src/dreamliner/configs/default.yaml` controls scenarios, reward weights, recovery targets, and observation
-normalization scales. The env loads this file by default; pass a different file or a Python dict to
-`StallRecoveryEnv(config=...)` to override.
+normalization scales. Fresh training runs snapshot a run-local `env_config.yaml` from it (with profile-specific
+curriculum scaling applied when needed). Pass a different file or a Python dict to `StallRecoveryEnv(config=...)` to
+override.
 
 DreamerV3 model + trainer hyperparameters are pulled from `vendor/r2dreamer/configs/model/_base_.yaml` and the
 per-profile `size{12M,25M,...,400M}.yaml` file, then overridden in `train.py:build_config` with our env-side knobs.

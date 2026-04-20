@@ -1,10 +1,152 @@
+import json
 import logging
+from collections import deque
+from pathlib import Path
+from statistics import median
 
 import torch
 
 import tools
 
 log = logging.getLogger("dreamer.trainer")
+
+_DIAGNOSTIC_WINDOW = 256
+_EPISODE_DIAGNOSTIC_KEYS = (
+    "success",
+    "crash",
+    "timeout",
+    "altitude_loss_ft",
+    "max_altitude_loss_ft",
+    "max_abs_alpha_deg",
+    "max_abs_roll_deg",
+    "min_vc_kts",
+    "max_descent_fps",
+    "stall_fraction",
+    "start_altitude_ft",
+    "altitude_loss_budget_ft",
+    "initial_alpha_deg",
+    "initial_beta_deg",
+    "initial_pitch_deg",
+    "initial_roll_deg",
+    "initial_vc_kts",
+    "initial_yaw_rate_dps",
+    "initial_throttle",
+    "final_alpha_deg",
+    "final_roll_deg",
+    "final_vc_kts",
+    "final_vspeed_fps",
+    "stable_streak_steps",
+    "episode_steps",
+    "curriculum_step",
+)
+_WINDOW_MEAN_KEYS = (
+    "score",
+    "length",
+    *_EPISODE_DIAGNOSTIC_KEYS,
+    "reward_alpha",
+    "reward_altitude_shape",
+    "reward_roll",
+    "reward_speed",
+    "reward_smooth",
+    "reward_alive",
+    "reward_crash",
+    "reward_success",
+    "reward_altitude_terminal",
+)
+_WINDOW_MEDIAN_KEYS = (
+    "score",
+    "length",
+    "altitude_loss_ft",
+    "max_altitude_loss_ft",
+    "max_abs_alpha_deg",
+    "max_abs_roll_deg",
+    "min_vc_kts",
+    "max_descent_fps",
+    "start_altitude_ft",
+    "altitude_loss_budget_ft",
+    "initial_beta_deg",
+    "initial_pitch_deg",
+    "initial_yaw_rate_dps",
+    "initial_throttle",
+    "final_alpha_deg",
+    "final_roll_deg",
+    "final_vc_kts",
+    "final_vspeed_fps",
+)
+_SCENARIO_WINDOW_KEYS = (
+    "success",
+    "crash",
+    "timeout",
+    "score",
+    "length",
+    "altitude_loss_ft",
+)
+
+
+def _to_float(value):
+    if isinstance(value, torch.Tensor):
+        value = value.item()
+    return float(value)
+
+
+def _mean(rows, key):
+    values = [float(row[key]) for row in rows if key in row]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _median(rows, key):
+    values = [float(row[key]) for row in rows if key in row]
+    if not values:
+        return None
+    return float(median(values))
+
+
+def _log_scalar(logger, name, value):
+    if value is not None:
+        logger.scalar(name, value)
+
+
+def _append_jsonl(path, payload):
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload) + "\n")
+
+
+def _log_window_diagnostics(logger, episodes):
+    rows = list(episodes)
+    if not rows:
+        return
+
+    logger.scalar("train_window/episodes", len(rows))
+    for key in _WINDOW_MEAN_KEYS:
+        _log_scalar(logger, f"train_window/{key}", _mean(rows, key))
+    for key in _WINDOW_MEDIAN_KEYS:
+        _log_scalar(logger, f"train_window/{key}_median", _median(rows, key))
+
+    curriculum_steps = [float(row["curriculum_step"]) for row in rows if "curriculum_step" in row]
+    if curriculum_steps:
+        logger.scalar("train_window/curriculum_step_min", min(curriculum_steps))
+        logger.scalar("train_window/curriculum_step_max", max(curriculum_steps))
+
+    scenario_keys = sorted({key for row in rows for key in row if key.startswith("scenario_")})
+    total = float(len(rows))
+    for scenario_key in scenario_keys:
+        scenario_rows = [row for row in rows if row.get(scenario_key, 0.0) > 0.5]
+        if not scenario_rows:
+            continue
+        scenario_name = scenario_key[len("scenario_"):]
+        prefix = f"train_window/by_scenario/{scenario_name}"
+        logger.scalar(f"{prefix}/episodes", len(scenario_rows))
+        logger.scalar(f"{prefix}/share", len(scenario_rows) / total)
+        for key in _SCENARIO_WINDOW_KEYS:
+            _log_scalar(logger, f"{prefix}/{key}", _mean(scenario_rows, key))
+        _log_scalar(logger, f"{prefix}/score_median", _median(scenario_rows, "score"))
+        _log_scalar(
+            logger,
+            f"{prefix}/altitude_loss_ft_median",
+            _median(scenario_rows, "altitude_loss_ft"),
+        )
 
 
 class OnlineTrainer:
@@ -40,6 +182,8 @@ class OnlineTrainer:
         # runs after each evaluation phase so the training driver can track
         # the best-so-far policy and save best.pt aside from latest.pt.
         self._on_eval = on_eval
+        self._episode_diag_path = Path(logdir) / "episode_diagnostics.jsonl"
+        self._recent_episodes = deque(maxlen=_DIAGNOSTIC_WINDOW)
 
     def eval(self, agent, train_step):
         """Run evaluation episodes.
@@ -117,7 +261,7 @@ class OnlineTrainer:
         self.logger.write(train_step)
         agent.train()
 
-    def begin(self, agent):
+    def begin(self, agent, start_step=0, update_count=0):
         """Main online training loop.
 
         The loop is designed to overlap CPU environment stepping and GPU model
@@ -126,8 +270,8 @@ class OnlineTrainer:
         """
         envs = self.train_envs
         video_cache = []
-        step = self.replay_buffer.count() * self._action_repeat
-        update_count = 0
+        step = int(start_step)
+        update_count = int(update_count)
         # (B,)
         done = torch.ones(envs.env_num, dtype=torch.bool, device=agent.device)
         returns = torch.zeros(envs.env_num, dtype=torch.float32, device=agent.device)
@@ -135,6 +279,8 @@ class OnlineTrainer:
         episode_ids = torch.arange(
             envs.env_num, dtype=torch.int32, device=agent.device
         )  # Increment this to prevent sampling across episode boundaries
+        next_episode_id = int(envs.env_num)
+        episode_metrics = {}
         train_metrics = {}
         agent_state = agent.get_initial_state(envs.env_num)
         # (B, A)
@@ -151,10 +297,32 @@ class OnlineTrainer:
                             video = torch.stack(video_cache, axis=0)
                             self.logger.video("train_video", tools.to_np(video[None]))
                             video_cache = []
-                        self.logger.scalar("episode/score", returns[i])
-                        self.logger.scalar("episode/length", lengths[i])
+                        episode = {
+                            "score": _to_float(returns[i]),
+                            "length": _to_float(lengths[i]),
+                        }
+                        for name, values in episode_metrics.items():
+                            episode[name] = _to_float(values[i])
+                        scenario_name = None
+                        for name, value in episode.items():
+                            if name.startswith("scenario_") and value > 0.5:
+                                scenario_name = name[len("scenario_"):]
+                                break
+                        if scenario_name is not None:
+                            episode["scenario_name"] = scenario_name
+                        _append_jsonl(self._episode_diag_path, {"step": int(step + i), **episode})
+                        self._recent_episodes.append(dict(episode))
+                        self.logger.scalar("episode/score", episode["score"])
+                        self.logger.scalar("episode/length", episode["length"])
+                        for name in _EPISODE_DIAGNOSTIC_KEYS:
+                            if name in episode:
+                                self.logger.scalar(f"episode/{name}", episode[name])
                         self.logger.write(step + i)  # to show all values on tensorboard
                         returns[i] = lengths[i] = 0
+                        for values in episode_metrics.values():
+                            values[i] = 0.0
+                        episode_ids[i] = next_episode_id
+                        next_episode_id += 1
             step += int((~done).sum()) * self._action_repeat  # step is based on env side
             lengths += ~done
             if self._progress_fn is not None:
@@ -189,8 +357,18 @@ class OnlineTrainer:
                 video_cache.append(trans["image"][0])
             self.replay_buffer.add_transition(trans.detach())
             returns += trans["reward"][:, 0]
+            for key, value in trans.items():
+                if key.startswith("log_"):
+                    metric_name = key[4:]
+                    if metric_name not in episode_metrics:
+                        episode_metrics[metric_name] = torch.zeros(
+                            envs.env_num,
+                            dtype=torch.float32,
+                            device=agent.device,
+                        )
+                    episode_metrics[metric_name] += value[:, 0]
             # Update models after enough data has accumulated
-            if step // (envs.env_num * self._action_repeat) > self.batch_length + 1:
+            if self.replay_buffer.count() > envs.env_num * (self.batch_length + 1):
                 if self._should_pretrain():
                     update_num = self.pretrain
                 else:
@@ -205,6 +383,7 @@ class OnlineTrainer:
                         value = tools.to_np(value) if isinstance(value, torch.Tensor) else value
                         self.logger.scalar(f"train/{name}", value)
                     self.logger.scalar("train/opt/updates", update_count)
+                    _log_window_diagnostics(self.logger, self._recent_episodes)
                     if self.video_pred_log:
                         data, _, initial = self.replay_buffer.sample()
                         self.logger.video("open_loop", tools.to_np(agent.video_pred(data, initial)))

@@ -24,7 +24,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from dreamliner.envs import DreamerStallEnv
-from dreamliner.evaluation._loader import find_latest_run, load_run
+from dreamliner.evaluation._loader import find_latest_run, load_run, resolve_run_env_config
 from dreamliner.evaluation.play import rollout_episodes
 
 
@@ -159,6 +159,7 @@ def main() -> None:
         print(f"No logdir given; using latest run: {logdir}")
     out_dir = logdir / "analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
+    env_config = resolve_run_env_config(logdir)
 
     print(f"Reading TensorBoard scalars from {logdir} ...")
     scalars = load_tb_scalars(logdir)
@@ -180,7 +181,7 @@ def main() -> None:
         print(f"\n=== Evaluating {ckpt}.pt ===")
         print(f"Loading agent from {logdir} ...")
         agent, config = load_run(logdir, prefer=ckpt)
-        env = DreamerStallEnv(seed=env_seed, disable_curriculum=True)
+        env = DreamerStallEnv(seed=env_seed, config=env_config, disable_curriculum=True)
         try:
             print(f"Running {args.episodes} greedy eval episodes from {ckpt}.pt ...")
             episodes = rollout_episodes(agent, env, args.episodes, config.device, progress=False)

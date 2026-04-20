@@ -94,9 +94,27 @@ class StallRecoveryEnv(gym.Env):
         self._np_random: np.random.Generator | None = None
         self._step_idx: int = 0
         self._start_altitude_ft: float = 0.0
+        self._prev_altitude_ft: float = 0.0
+        self._episode_curriculum_step: int = 0
         self._stable_streak: int = 0
         self._prev_action: np.ndarray = np.zeros(4, dtype=np.float32)
         self._current_scenario_name: str = ""
+        self._scenario_names: tuple[str, ...] = tuple(s.name for s in self._scenarios)
+        self._episode_initial_alpha_deg: float = 0.0
+        self._episode_initial_beta_deg: float = 0.0
+        self._episode_initial_pitch_deg: float = 0.0
+        self._episode_initial_roll_deg: float = 0.0
+        self._episode_initial_vc_kts: float = 0.0
+        self._episode_initial_yaw_rate_dps: float = 0.0
+        self._episode_initial_throttle: float = 0.0
+        self._episode_altitude_loss_budget_ft: float = 0.0
+        self._episode_max_abs_alpha_deg: float = 0.0
+        self._episode_max_abs_roll_deg: float = 0.0
+        self._episode_min_vc_kts: float = 0.0
+        self._episode_max_descent_fps: float = 0.0
+        self._episode_max_altitude_loss_ft: float = 0.0
+        self._episode_stall_steps: int = 0
+        self._episode_reward_terms: dict[str, float] = {}
 
     # --- Gym API ------------------------------------------------------------
 
@@ -114,7 +132,21 @@ class StallRecoveryEnv(gym.Env):
         # the safest reliable pattern is to rebuild the FDM each episode.
         self._fdm = J.make_fdm(self._aircraft, self._sim_dt_hz, self._output_directive)
 
-        if self._curriculum is not None:
+        forced_scenario = None
+        if options is not None:
+            scenario_name = options.get("scenario")
+            if scenario_name is not None:
+                forced_scenario = next(
+                    (scenario for scenario in self._scenarios if scenario.name == scenario_name),
+                    None,
+                )
+                if forced_scenario is None:
+                    raise ValueError(f"unknown scenario override: {scenario_name}")
+
+        if forced_scenario is not None:
+            scenario = forced_scenario
+            curriculum_step = self._curriculum.current_step() if self._curriculum is not None else 0
+        elif self._curriculum is not None:
             scenario, curriculum_step = self._curriculum.sample(self._np_random, self._scenarios)
         else:
             scenario = J.sample_scenario(self._np_random, self._scenarios)
@@ -123,9 +155,22 @@ class StallRecoveryEnv(gym.Env):
         ics = J.apply_scenario(self._fdm, scenario, self._np_random)
 
         self._step_idx = 0
+        self._episode_curriculum_step = int(curriculum_step)
         self._stable_streak = 0
         self._start_altitude_ft = float(self._fdm[P.altitude_ft])
+        self._prev_altitude_ft = self._start_altitude_ft
         self._prev_action = np.zeros(4, dtype=np.float32)
+        self._reset_episode_diagnostics()
+        initial_raw = self._read_state_raw()
+        self._episode_initial_beta_deg = initial_raw["beta_deg"]
+        self._episode_initial_pitch_deg = float(ics["pitch_deg"])
+        self._episode_initial_alpha_deg = initial_raw["alpha_deg"]
+        self._episode_initial_roll_deg = float(np.degrees(initial_raw["roll_rad"]))
+        self._episode_initial_vc_kts = initial_raw["vc_kts"]
+        self._episode_initial_yaw_rate_dps = float(ics["yaw_rate_dps"])
+        self._episode_initial_throttle = float(ics["throttle"])
+        self._episode_altitude_loss_budget_ft = self._max_altitude_loss_budget_ft()
+        self._update_episode_diagnostics(initial_raw)
 
         obs = self._read_obs()
         info = {"scenario": scenario.name, "ics": ics, "curriculum_step": curriculum_step}
@@ -163,25 +208,35 @@ class StallRecoveryEnv(gym.Env):
         else:
             self._stable_streak = 0
         success = self._stable_streak >= self._success_hold_steps
+        self._update_episode_diagnostics(raw)
 
-        reward = self._compute_reward(raw, action, crashed=crashed, success=success)
+        reward, reward_terms = self._compute_reward(raw, action, crashed=crashed, success=success)
 
         self._step_idx += 1
         terminated = bool(crashed or success)
         truncated = bool(self._step_idx >= self._max_episode_steps)
 
         # Terminal altitude-loss penalty: one lump at episode end proportional
-        # to total ft lost from start. Keeps the per-step alt term small (pure
-        # gradient signal) while the terminal term carries the real cost of a
-        # deep recovery. Applied on success, crash, and timeout.
-        if terminated or truncated:
+        # to total ft lost from start on failed episodes. Keeps the per-step
+        # alt term small (pure gradient signal) while a failed deep recovery
+        # still carries a large cost.
+        if (terminated or truncated) and not success:
             final_alt_loss = max(0.0, self._start_altitude_ft - raw["altitude_ft"])
-            reward += -self._reward["altitude_loss_terminal_penalty_per_ft"] * final_alt_loss
+            terminal_altitude_term = -self._reward["altitude_loss_terminal_penalty_per_ft"] * final_alt_loss
+            reward += terminal_altitude_term
+            reward_terms["altitude_terminal"] = terminal_altitude_term
+        else:
+            reward_terms["altitude_terminal"] = 0.0
+        self._accumulate_reward_terms(reward_terms)
 
+        self._prev_altitude_ft = raw["altitude_ft"]
         self._prev_action = action
+        timeout = bool(truncated and not terminated)
+        outcome = "success" if success else "crash" if crashed else "timeout" if timeout else "running"
 
         info = {
             "scenario": self._current_scenario_name,
+            "outcome": outcome,
             "altitude_ft": raw["altitude_ft"],
             "altitude_loss_ft": self._start_altitude_ft - raw["altitude_ft"],
             "alpha_deg": raw["alpha_deg"],
@@ -192,6 +247,39 @@ class StallRecoveryEnv(gym.Env):
             "success": success,
             "stable_streak_steps": self._stable_streak,
         }
+        if terminated or truncated:
+            info.update({
+                "log_success": float(success),
+                "log_crash": float(crashed),
+                "log_timeout": float(timeout),
+                "log_altitude_loss_ft": float(info["altitude_loss_ft"]),
+                "log_max_altitude_loss_ft": float(self._episode_max_altitude_loss_ft),
+                "log_max_abs_alpha_deg": float(self._episode_max_abs_alpha_deg),
+                "log_max_abs_roll_deg": float(self._episode_max_abs_roll_deg),
+                "log_min_vc_kts": float(self._episode_min_vc_kts),
+                "log_max_descent_fps": float(self._episode_max_descent_fps),
+                "log_stall_fraction": float(self._episode_stall_steps / max(1, self._step_idx)),
+                "log_curriculum_step": float(self._episode_curriculum_step),
+                "log_start_altitude_ft": float(self._start_altitude_ft),
+                "log_altitude_loss_budget_ft": float(self._episode_altitude_loss_budget_ft),
+                "log_initial_alpha_deg": float(self._episode_initial_alpha_deg),
+                "log_initial_beta_deg": float(self._episode_initial_beta_deg),
+                "log_initial_pitch_deg": float(self._episode_initial_pitch_deg),
+                "log_initial_roll_deg": float(self._episode_initial_roll_deg),
+                "log_initial_vc_kts": float(self._episode_initial_vc_kts),
+                "log_initial_yaw_rate_dps": float(self._episode_initial_yaw_rate_dps),
+                "log_initial_throttle": float(self._episode_initial_throttle),
+                "log_final_alpha_deg": float(raw["alpha_deg"]),
+                "log_final_roll_deg": float(np.degrees(raw["roll_rad"])),
+                "log_final_vc_kts": float(raw["vc_kts"]),
+                "log_final_vspeed_fps": float(raw["vspeed_fps"]),
+                "log_stable_streak_steps": float(self._stable_streak),
+                "log_episode_steps": float(self._step_idx),
+            })
+            for name in self._scenario_names:
+                info[f"log_scenario_{name}"] = float(name == self._current_scenario_name)
+            for key, value in self._episode_reward_terms.items():
+                info[f"log_reward_{key}"] = float(value)
         return obs, float(reward), terminated, truncated, info
 
     def close(self) -> None:
@@ -271,15 +359,15 @@ class StallRecoveryEnv(gym.Env):
         *,
         crashed: bool,
         success: bool,
-    ) -> float:
+    ) -> tuple[float, dict[str, float]]:
         r = self._reward
         t = self._targets
 
         alpha_excess = max(0.0, raw["alpha_deg"] - t["alpha_deg_threshold"])
         alpha_term = -r["alpha_penalty_per_deg"] * alpha_excess
 
-        altitude_loss = max(0.0, self._start_altitude_ft - raw["altitude_ft"])
-        alt_term = -r["altitude_loss_penalty_per_ft"] * altitude_loss
+        incremental_altitude_loss = max(0.0, self._prev_altitude_ft - raw["altitude_ft"])
+        alt_term = -r["altitude_loss_penalty_per_ft"] * incremental_altitude_loss
 
         roll_term = -r["roll_penalty_per_deg"] * abs(np.degrees(raw["roll_rad"]))
 
@@ -288,16 +376,57 @@ class StallRecoveryEnv(gym.Env):
 
         delta = np.abs(action - self._prev_action).mean()
         smooth_term = -r["control_smoothness_penalty"] * float(delta)
+        alive_term = r.get("step_alive_bonus", 0.0)
+        crash_term = r["crash_penalty"] if crashed else 0.0
+        success_term = r["success_bonus"] if success else 0.0
 
         total = (
-            alpha_term + alt_term + roll_term + speed_term + smooth_term
-            + r.get("step_alive_bonus", 0.0)
+            alpha_term + alt_term + roll_term + speed_term + smooth_term + alive_term
+            + crash_term + success_term
         )
-        if crashed:
-            total += r["crash_penalty"]
-        if success:
-            total += r["success_bonus"]
-        return total
+        return total, {
+            "alpha": float(alpha_term),
+            "altitude_shape": float(alt_term),
+            "roll": float(roll_term),
+            "speed": float(speed_term),
+            "smooth": float(smooth_term),
+            "alive": float(alive_term),
+            "crash": float(crash_term),
+            "success": float(success_term),
+        }
+
+    def _reset_episode_diagnostics(self) -> None:
+        self._episode_max_abs_alpha_deg = 0.0
+        self._episode_max_abs_roll_deg = 0.0
+        self._episode_min_vc_kts = float("inf")
+        self._episode_max_descent_fps = 0.0
+        self._episode_max_altitude_loss_ft = 0.0
+        self._episode_stall_steps = 0
+        self._episode_reward_terms = {
+            "alpha": 0.0,
+            "altitude_shape": 0.0,
+            "roll": 0.0,
+            "speed": 0.0,
+            "smooth": 0.0,
+            "alive": 0.0,
+            "crash": 0.0,
+            "success": 0.0,
+            "altitude_terminal": 0.0,
+        }
+
+    def _update_episode_diagnostics(self, raw: dict[str, float]) -> None:
+        altitude_loss = max(0.0, self._start_altitude_ft - raw["altitude_ft"])
+        self._episode_max_abs_alpha_deg = max(self._episode_max_abs_alpha_deg, abs(raw["alpha_deg"]))
+        self._episode_max_abs_roll_deg = max(self._episode_max_abs_roll_deg, abs(np.degrees(raw["roll_rad"])))
+        self._episode_min_vc_kts = min(self._episode_min_vc_kts, raw["vc_kts"])
+        self._episode_max_descent_fps = max(self._episode_max_descent_fps, raw["vspeed_fps"])
+        self._episode_max_altitude_loss_ft = max(self._episode_max_altitude_loss_ft, altitude_loss)
+        if raw["stall_hyst_norm"] > 0.5:
+            self._episode_stall_steps += 1
+
+    def _accumulate_reward_terms(self, reward_terms: dict[str, float]) -> None:
+        for key, value in reward_terms.items():
+            self._episode_reward_terms[key] = self._episode_reward_terms.get(key, 0.0) + float(value)
 
 
 # --- Config loading ----------------------------------------------------------

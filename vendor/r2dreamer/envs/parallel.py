@@ -48,25 +48,40 @@ class ParallelEnv:
         """
         promise = [e.reset() if d else e.step(a) for e, a, d in zip(self.envs, tools.to_np(action), done)]
         new_o, new_r, new_d = [], [], []
-        for p, d in zip(promise, done):
+        log_values = {}
+        for index, (p, d) in enumerate(zip(promise, done)):
             if d:
                 new_o.append(p())
                 new_r.append(0.0)
                 new_d.append(False)
+                info = {}
             else:
-                o, r, d, _ = p()
+                o, r, d, info = p()
                 new_o.append(o)
                 new_r.append(r)
                 new_d.append(d)
+            for key, value in info.items():
+                if key.startswith("log_"):
+                    if key not in log_values:
+                        log_values[key] = np.zeros(self.env_num, dtype=np.float32)
+                    log_values[key][index] = float(value)
         obs_stacked = {k: np.stack([o[k] for o in new_o]) for k in new_o[0].keys()}
 
         # Build CPU tensors first to avoid implicit GPU syncs and enable async H2D in caller.
         obs_tensors = {k: torch.as_tensor(v, device="cpu") for k, v in obs_stacked.items()}
         rew_stacked = torch.as_tensor(new_r, dtype=torch.float32, device="cpu")
+        log_tensors = {
+            key: torch.as_tensor(value, dtype=torch.float32, device="cpu")
+            for key, value in log_values.items()
+        }
 
         # Keep data on CPU; caller will .to(device, non_blocking=True) after pinning.
         # TensorDict batch size is (B,).
-        td = TensorDict({**obs_tensors, "reward": rew_stacked}, batch_size=(self.env_num,), device="cpu").pin_memory()
+        td = TensorDict(
+            {**obs_tensors, "reward": rew_stacked, **log_tensors},
+            batch_size=(self.env_num,),
+            device="cpu",
+        ).pin_memory()
         done = torch.as_tensor(new_d, device="cpu")
         return self.lift_dim(td), done
 

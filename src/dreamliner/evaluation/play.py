@@ -28,7 +28,7 @@ if str(_VENDOR_ROOT) not in sys.path:
 from tensordict import TensorDict  # noqa: E402
 
 from dreamliner.envs import DreamerStallEnv  # noqa: E402
-from dreamliner.evaluation._loader import find_latest_run, load_run  # noqa: E402
+from dreamliner.evaluation._loader import find_latest_run, load_run, resolve_run_env_config  # noqa: E402
 from dreamliner.utils.flightgear import launch_flightgear, wait_until_ready  # noqa: E402
 
 _FG_READY_TIMEOUT_SECS = 180.0
@@ -127,6 +127,7 @@ def main() -> None:
         print(f"No logdir given; using latest run: {logdir}")
     agent, config = load_run(logdir)
     device = config.device
+    env_config = resolve_run_env_config(logdir)
 
     if args.flightgear and not args.no_fg_launch:
         proc = launch_flightgear(aircraft=args.fg_aircraft)
@@ -139,7 +140,7 @@ def main() -> None:
         elapsed = wait_until_ready(timeout=_FG_READY_TIMEOUT_SECS)
         print(f"FlightGear ready after {elapsed:.1f}s; starting agent rollouts...")
 
-    env = DreamerStallEnv(seed=0, flightgear=args.flightgear)
+    env = DreamerStallEnv(seed=0, config=env_config, flightgear=args.flightgear)
     try:
         episodes = rollout_episodes(agent, env, args.episodes, device)
     finally:

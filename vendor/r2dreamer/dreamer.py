@@ -155,6 +155,7 @@ class Dreamer(nn.Module):
             return 1.0
 
         self._scheduler = LambdaLR(self._optimizer, lr_lambda=lr_lambda)
+        self._optimizer_skipped_steps = 0
 
         self.train()
         self.clone_and_freeze()
@@ -321,25 +322,44 @@ class Dreamer(nn.Module):
         self._scaler.unscale_(self._optimizer)  # unscale grads in params
         if self.rep_loss == "dreamerpro" and self._ema_updates < self.freeze_prototypes_iters:
             self._prototypes.grad.zero_()
+        old_params = None
         if self._log_grads:
             old_params = [p.data.clone().detach() for p in self._named_params.values()]
-            grads = [p.grad for p in self._named_params.values() if p.grad is not None]  # log grads before clipping
-            grad_norm = tools.compute_global_norm(grads)
-            grad_rms = tools.compute_rms(grads)
-            mets["opt/grad_norm"] = grad_norm
-            mets["opt/grad_rms"] = grad_rms
+        grads = [p.grad for p in self._named_params.values() if p.grad is not None]  # log grads before clipping
+        params = list(self._named_params.values())
+        grad_norm = tools.compute_global_norm(grads)
+        grad_rms = tools.compute_rms(grads)
+        param_norm = tools.compute_global_norm(params)
+        param_rms = tools.compute_rms(params)
+        nonfinite_grad_tensors = sum(
+            int(not torch.isfinite(grad).all().item())
+            for grad in grads
+        )
+        mets["opt/grad_norm"] = grad_norm
+        mets["opt/grad_rms"] = grad_rms
+        mets["opt/param_norm"] = param_norm
+        mets["opt/param_rms"] = param_rms
+        mets["opt/grad_nonfinite_tensors"] = float(nonfinite_grad_tensors)
+        mets["opt/grad_nonfinite_fraction"] = (
+            float(nonfinite_grad_tensors / len(grads)) if grads else 0.0
+        )
         self._agc(self._named_params.values())  # clipping
+        grad_scale_before = float(self._scaler.get_scale())
         self._scaler.step(self._optimizer)  # update params
         self._scaler.update()  # adjust scale
+        grad_scale_after = float(self._scaler.get_scale())
+        overflow = float(grad_scale_after < grad_scale_before)
+        self._optimizer_skipped_steps += int(overflow)
         self._scheduler.step()  # increment scheduler
         self._optimizer.zero_grad(set_to_none=True)  # reset grads
         mets["opt/lr"] = self._scheduler.get_lr()[0]
-        mets["opt/grad_scale"] = self._scaler.get_scale()
+        mets["opt/grad_scale_before"] = grad_scale_before
+        mets["opt/grad_scale"] = grad_scale_after
+        mets["opt/overflow"] = overflow
+        mets["opt/skipped_steps"] = float(self._optimizer_skipped_steps)
         if self._log_grads:
             updates = [(new - old) for (new, old) in zip(self._named_params.values(), old_params)]
             update_rms = tools.compute_rms(updates)
-            params_rms = tools.compute_rms(self._named_params.values())
-            mets["opt/param_rms"] = params_rms
             mets["opt/update_rms"] = update_rms
         metrics.update(mets)
         # update latent vectors in replay buffer

@@ -132,12 +132,13 @@ targets:
   max_altitude_loss_ft: 2000.0
   max_altitude_loss_fraction_of_start: 0.25
 
-# Reward weights. Per-step terms are summed each agent step; terminal terms
-# are applied once when the episode ends (crash, success, or truncation).
+# Reward weights. Per-step terms are summed each agent step. Success/crash
+# terms are terminal, and the terminal altitude-loss penalty is applied only
+# on failed episodes.
 reward:
   alpha_penalty_per_deg: 0.05         # negative for alpha above target
-  altitude_loss_penalty_per_ft: 0.001 # per-step shaping signal (small)
-  altitude_loss_terminal_penalty_per_ft: 0.1 # one-shot at episode end (dominant)
+  altitude_loss_penalty_per_ft: 0.001 # per-step incremental altitude-loss shaping
+  altitude_loss_terminal_penalty_per_ft: 0.1 # one-shot on failed episodes only
   roll_penalty_per_deg: 0.05
   airspeed_bonus_per_kt: 0.01         # positive once above stall speed
   control_smoothness_penalty: 0.1     # multiplied by mean |delta action|

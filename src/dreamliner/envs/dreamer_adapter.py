@@ -26,17 +26,20 @@ class DreamerStallEnv:
         self,
         seed: int = 0,
         *,
+        config: dict | str | Path | None = None,
         flightgear: bool = False,
         curriculum_step_file: str | Path | None = None,
         disable_curriculum: bool = False,
     ):
         self._env = StallRecoveryEnv(
+            config=config,
             flightgear=flightgear,
             curriculum_step_file=curriculum_step_file,
             disable_curriculum=disable_curriculum,
         )
         self._seed = int(seed)
         self._reset_seed_used = False
+        self.last_reset_info: dict[str, Any] = {}
 
     @property
     def observation_space(self) -> gym.spaces.Dict:
@@ -50,12 +53,19 @@ class DreamerStallEnv:
     def action_space(self) -> gym.spaces.Box:
         return self._env.action_space
 
-    def reset(self) -> dict[str, np.ndarray]:
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, np.ndarray]:
         # Apply the deterministic seed only the first time so each fresh episode
         # samples a different scenario via the env's internal RNG.
-        seed = self._seed if not self._reset_seed_used else None
+        if seed is None:
+            seed = self._seed if not self._reset_seed_used else None
         self._reset_seed_used = True
-        obs, _info = self._env.reset(seed=seed)
+        obs, info = self._env.reset(seed=seed, options=options)
+        self.last_reset_info = dict(info)
         return self._add_flags(obs, is_first=True, is_last=False, is_terminal=False)
 
     def step(self, action: np.ndarray) -> tuple[dict[str, np.ndarray], float, bool, dict]:

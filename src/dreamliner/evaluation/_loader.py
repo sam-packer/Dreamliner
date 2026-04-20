@@ -17,6 +17,12 @@ if str(_VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(_VENDOR_ROOT))
 
 
+def resolve_run_env_config(logdir: Path | str) -> Path | None:
+    """Return the run-specific env config snapshot if present."""
+    candidate = Path(logdir) / "env_config.yaml"
+    return candidate if candidate.exists() else None
+
+
 def find_latest_run(log_root: str | Path = "runs/dreamer") -> Path:
     """Return the most recently modified ``runs/dreamer/<run>/`` dir that has a checkpoint."""
     root = Path(log_root)
@@ -62,7 +68,7 @@ def load_run(
         config.model.device = device
 
     # Spaces come from a throwaway env instance; cheaper than re-deriving in code.
-    probe_env = DreamerStallEnv(seed=0)
+    probe_env = DreamerStallEnv(seed=0, config=resolve_run_env_config(logdir))
     obs_space = probe_env.observation_space
     act_space = probe_env.action_space
     probe_env.close()
@@ -77,6 +83,10 @@ def load_run(
         extras.append(f"step={state['step']}")
     if "eval_score" in state:
         extras.append(f"score={state['eval_score']:.2f}")
+    if "validation_success_rate" in state:
+        extras.append(f"val_success={state['validation_success_rate']*100:.1f}%")
+    if "validation_crash_rate" in state:
+        extras.append(f"val_crash={state['validation_crash_rate']*100:.1f}%")
     suffix = f" ({', '.join(extras)})" if extras else ""
     print(f"Loaded {ckpt_path.name} from {logdir}{suffix}")
     return agent, config
