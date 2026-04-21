@@ -108,10 +108,30 @@ uv run play runs/dreamer/baseline                      # specific run
 uv run play --episodes 10                              # more rollouts
 uv run play --flightgear                               # with FlightGear (auto-launch)
 uv run play --flightgear --no-fg-launch                # FG already running; just stream
+uv run play --flightgear --episodes 1 --scenario turning_stall
+uv run play --flightgear --episodes 1 --scenario turning_stall --fg-replay-views cockpit,chase
+uv run play --flightgear --episodes 1 --scenario turning_stall --fg-cockpit-fov 90
+uv run play --flightgear --episodes 1 --scenario high_alpha_entry
+uv run play --flightgear --episodes 1 --scenario wings_level_stall
+uv run play --flightgear --episodes 1 --scenario turning_stall
+uv run play --flightgear --episodes 1 --scenario nose_high_upset
+uv run play --flightgear --episodes 1 --scenario incipient_spin
 uv run play --out trajectories.json                    # save per-episode log
 ```
 
-Per-episode line goes to stdout: scenario, return, altitude lost, step count, outcome (success / timeout / crash).
+`play` now prints each episode's sampled initial conditions up front (scenario, curriculum step, altitude, airspeed,
+alpha, pitch, roll, beta, yaw rate, throttle), then a terminal summary with sim-time duration and final state. In
+FlightGear mode it also prints one telemetry line per simulated second so you can tell whether the aircraft is still
+stalled and how close it is to the 5-second recovery hold.
+
+With `--flightgear`, each logical episode is replayed through the configured inspection view sequence using the exact
+same sampled initial conditions. The default sequence is `cockpit,chase`. Use `--fg-replay-views` to
+change that order or reduce it to a single view, and `--fg-cockpit-fov` to start the cockpit replay more zoomed out.
+
+`play` prefers `last_good.pt` when present, then falls back to `best.pt`, then `latest.pt`. With `--flightgear`,
+JSBSim is paced to wall-clock time so the FG cockpit actually plays the maneuver instead of receiving a burst of
+fast-forward packets. If the run has `_curriculum_step.txt`, `play` uses it so scenario sampling matches the saved
+training phase; `--scenario <name>` overrides that and forces a specific case every episode.
 
 ### Evaluate
 

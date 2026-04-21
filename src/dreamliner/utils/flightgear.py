@@ -8,6 +8,7 @@ cockpit window survives even after ``play`` exits.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -25,6 +26,166 @@ _DEFAULT_AIRCRAFT = "737-300"
 # cockpit is actually ready to receive FDM packets (scenery load is the slow
 # step — often 30-60s on first launch).
 _TELNET_PORT = 5501
+_TELNET_TIMEOUT_SECS = 2.0
+_VIEW_ALIAS_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "cockpit": ("Pilot View", "Captain View", "Captain", "Cockpit View", "Pilot"),
+    "chase": ("Chase View", "Helicopter View", "Chase"),
+    "tower": ("Tower View", "Tower"),
+    "fly-by": ("Fly-By View", "Fly By View", "Fly-by"),
+}
+
+
+def _normalize_view_name(name: str) -> str:
+    return " ".join(name.strip().lower().replace("-", " ").split())
+
+
+def _telnet_command(
+    command: str,
+    *,
+    port: int = _TELNET_PORT,
+    timeout: float = _TELNET_TIMEOUT_SECS,
+    expect_response: bool = True,
+) -> str:
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
+        s.settimeout(timeout)
+        s.sendall(command.encode("utf-8") + b"\r\n")
+        if not expect_response:
+            return ""
+        buf = b""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                chunk = s.recv(4096)
+            except (TimeoutError, socket.timeout):
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"\n" in buf:
+                break
+        return buf.decode("utf-8", errors="ignore")
+
+
+def _parse_get_response(text: str) -> str | None:
+    quoted = re.search(r"=\s*'([^']*)'", text)
+    if quoted is not None:
+        return quoted.group(1)
+    plain = re.search(r"=\s*([^\r\n]+)", text)
+    if plain is None:
+        return None
+    value = plain.group(1).strip()
+    if " (" in value:
+        value = value.split(" (", 1)[0].strip()
+    return value if value else None
+
+
+def get_property(
+    path: str,
+    *,
+    port: int = _TELNET_PORT,
+    timeout: float = _TELNET_TIMEOUT_SECS,
+) -> str | None:
+    return _parse_get_response(_telnet_command(f"get {path}", port=port, timeout=timeout))
+
+
+def set_property(
+    path: str,
+    value: str | int | float,
+    *,
+    port: int = _TELNET_PORT,
+    timeout: float = _TELNET_TIMEOUT_SECS,
+) -> None:
+    if isinstance(value, float):
+        value_text = f"{value:.6f}"
+    else:
+        value_text = str(value)
+    _telnet_command(f"set {path} {value_text}", port=port, timeout=timeout, expect_response=False)
+
+
+def list_available_views(
+    *,
+    port: int = _TELNET_PORT,
+    timeout: float = _TELNET_TIMEOUT_SECS,
+    max_views: int = 32,
+) -> list[tuple[int, str]]:
+    views: list[tuple[int, str]] = []
+    consecutive_misses = 0
+    for idx in range(max_views):
+        name = get_property(f"/sim/view[{idx}]/name", port=port, timeout=timeout)
+        if name is None:
+            consecutive_misses += 1
+            if views and consecutive_misses >= 4:
+                break
+            continue
+        views.append((idx, name))
+        consecutive_misses = 0
+    return views
+
+
+def resolve_view_name(
+    requested: str,
+    *,
+    port: int = _TELNET_PORT,
+    timeout: float = _TELNET_TIMEOUT_SECS,
+) -> tuple[int, str]:
+    views = list_available_views(port=port, timeout=timeout)
+    if not views:
+        raise RuntimeError("FlightGear reported no available views over telnet.")
+
+    requested_norm = _normalize_view_name(requested)
+    normalized_views = [(_normalize_view_name(name), idx, name) for idx, name in views]
+
+    for norm_name, idx, name in normalized_views:
+        if norm_name == requested_norm:
+            return idx, name
+
+    candidates = tuple(_normalize_view_name(name) for name in _VIEW_ALIAS_CANDIDATES.get(requested_norm, (requested,)))
+    for candidate in candidates:
+        for norm_name, idx, name in normalized_views:
+            if norm_name == candidate:
+                return idx, name
+
+    for candidate in candidates:
+        for norm_name, idx, name in normalized_views:
+            if candidate in norm_name:
+                return idx, name
+
+    available = ", ".join(name for _, name in views)
+    raise RuntimeError(f"Could not resolve FlightGear view {requested!r}. Available views: {available}")
+
+
+def select_view(
+    requested: str,
+    *,
+    port: int = _TELNET_PORT,
+    timeout: float = _TELNET_TIMEOUT_SECS,
+) -> tuple[int, str]:
+    idx, actual_name = resolve_view_name(requested, port=port, timeout=timeout)
+    set_property("/sim/current-view/view-number", idx, port=port, timeout=timeout)
+    return idx, actual_name
+
+
+def configure_inspection_view(
+    requested: str,
+    *,
+    cockpit_fov: float,
+    port: int = _TELNET_PORT,
+    timeout: float = _TELNET_TIMEOUT_SECS,
+    settle_seconds: float = 0.35,
+) -> str:
+    idx, actual_name = select_view(requested, port=port, timeout=timeout)
+    time.sleep(settle_seconds)
+    if _normalize_view_name(requested) == "cockpit":
+        for path in (
+            "/sim/current-view/field-of-view",
+            "/sim/current-view/config/field-of-view",
+            "/sim/current-view/config/default-field-of-view-deg",
+            f"/sim/view[{idx}]/config/field-of-view",
+            f"/sim/view[{idx}]/config/default-field-of-view-deg",
+        ):
+            set_property(path, cockpit_fov, port=port, timeout=timeout)
+        time.sleep(settle_seconds)
+    return actual_name
 
 
 def _build_fg_args(aircraft: str) -> list[str]:

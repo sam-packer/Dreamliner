@@ -53,6 +53,18 @@ class DreamerStallEnv:
     def action_space(self) -> gym.spaces.Box:
         return self._env.action_space
 
+    @property
+    def agent_dt_hz(self) -> int:
+        return self._env._agent_dt_hz
+
+    @property
+    def success_hold_seconds(self) -> float:
+        return self._env._success_hold_steps / self._env._agent_dt_hz
+
+    @property
+    def max_episode_seconds(self) -> float:
+        return self._env._max_episode_steps / self._env._agent_dt_hz
+
     def reset(
         self,
         *,

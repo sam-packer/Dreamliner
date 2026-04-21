@@ -271,6 +271,50 @@ def _u(rng: np.random.Generator, lo: float, hi: float) -> float:
     return float(rng.uniform(lo, hi))
 
 
+def apply_initial_conditions(
+    fdm: jsbsim.FGFDMExec,
+    ics: Mapping[str, float],
+) -> dict[str, float]:
+    """Write exact initial conditions to ``fdm`` and call ``run_ic()``."""
+    altitude = float(ics["altitude_ft"])
+    airspeed = float(ics["airspeed_kcas"])
+    alpha = float(ics["alpha_deg"])
+    pitch = float(ics["pitch_deg"])
+    roll = float(ics["roll_deg"])
+    beta = float(ics["beta_deg"])
+    yaw_rate = float(ics["yaw_rate_dps"])
+    throttle = float(ics["throttle"])
+
+    fdm[P.ic_h_sl_ft] = altitude
+    fdm[P.ic_vc_kts] = airspeed
+    fdm[P.ic_alpha_deg] = alpha
+    fdm[P.ic_theta_deg] = pitch
+    fdm[P.ic_phi_deg] = roll
+    fdm[P.ic_beta_deg] = beta
+    fdm[P.ic_psi_true_deg] = 0.0
+    fdm[P.ic_p_rad_sec] = 0.0
+    fdm[P.ic_q_rad_sec] = 0.0
+    fdm[P.ic_r_rad_sec] = np.deg2rad(yaw_rate)
+
+    if not fdm.run_ic():
+        raise RuntimeError("fdm.run_ic() returned False; ICs may be inconsistent.")
+
+    # Set throttle and start the engines so we have thrust available immediately.
+    fdm[P.throttle_cmd] = throttle
+    fdm.get_propulsion().init_running(-1)  # -1 = all engines
+
+    return {
+        "altitude_ft": altitude,
+        "airspeed_kcas": airspeed,
+        "alpha_deg": alpha,
+        "pitch_deg": pitch,
+        "roll_deg": roll,
+        "beta_deg": beta,
+        "yaw_rate_dps": yaw_rate,
+        "throttle": throttle,
+    }
+
+
 def apply_scenario(
     fdm: jsbsim.FGFDMExec,
     scenario: ScenarioSpec,
@@ -298,25 +342,7 @@ def apply_scenario(
     else:
         yaw_rate = _u(rng, *scenario.yaw_rate_dps)
 
-    fdm[P.ic_h_sl_ft]      = altitude
-    fdm[P.ic_vc_kts]       = airspeed
-    fdm[P.ic_alpha_deg]    = alpha
-    fdm[P.ic_theta_deg]    = pitch
-    fdm[P.ic_phi_deg]      = roll_mag
-    fdm[P.ic_beta_deg]     = beta
-    fdm[P.ic_psi_true_deg] = 0.0
-    fdm[P.ic_p_rad_sec]    = 0.0
-    fdm[P.ic_q_rad_sec]    = 0.0
-    fdm[P.ic_r_rad_sec]    = np.deg2rad(yaw_rate)
-
-    if not fdm.run_ic():
-        raise RuntimeError("fdm.run_ic() returned False; ICs may be inconsistent.")
-
-    # Set throttle and start the engines so we have thrust available immediately.
-    fdm[P.throttle_cmd] = throttle
-    fdm.get_propulsion().init_running(-1)  # -1 = all engines
-
-    return {
+    return apply_initial_conditions(fdm, {
         "altitude_ft": altitude,
         "airspeed_kcas": airspeed,
         "alpha_deg": alpha,
@@ -325,7 +351,7 @@ def apply_scenario(
         "beta_deg": beta,
         "yaw_rate_dps": yaw_rate,
         "throttle": throttle,
-    }
+    })
 
 
 def aileron_pos_norm(fdm: jsbsim.FGFDMExec) -> float:

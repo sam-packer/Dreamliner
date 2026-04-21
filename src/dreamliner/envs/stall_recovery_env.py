@@ -7,6 +7,7 @@ can drive DreamerV3 (`encoder.mlp_keys='state'`) and SB3 ``MultiInputPolicy``.
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any
 
 import gymnasium as gym
@@ -61,6 +62,8 @@ class StallRecoveryEnv(gym.Env):
         self._aircraft: str = env_cfg["aircraft"]
         self._sim_dt_hz: int = int(env_cfg["sim_dt_hz"])
         self._agent_dt_hz: int = int(env_cfg["agent_dt_hz"])
+        self._realtime_step_seconds: float | None = (1.0 / self._sim_dt_hz) if flightgear else None
+        self._realtime_next_tick: float | None = None
         if self._sim_dt_hz % self._agent_dt_hz != 0:
             raise ValueError("sim_dt_hz must be a multiple of agent_dt_hz")
         self._substeps: int = self._sim_dt_hz // self._agent_dt_hz
@@ -132,6 +135,7 @@ class StallRecoveryEnv(gym.Env):
         self._fdm = J.make_fdm(self._aircraft, self._sim_dt_hz, self._output_directive)
 
         forced_scenario = None
+        forced_ics: dict[str, float] | None = None
         if options is not None:
             scenario_name = options.get("scenario")
             if scenario_name is not None:
@@ -141,17 +145,35 @@ class StallRecoveryEnv(gym.Env):
                 )
                 if forced_scenario is None:
                     raise ValueError(f"unknown scenario override: {scenario_name}")
+            initial_conditions = options.get("initial_conditions")
+            if initial_conditions is not None:
+                forced_ics = {
+                    key: float(value) for key, value in dict(initial_conditions).items()
+                }
 
-        if forced_scenario is not None:
+        if forced_ics is not None:
+            scenario_name_out = (
+                forced_scenario.name
+                if forced_scenario is not None
+                else str(options.get("scenario") or self._current_scenario_name or "replay")
+            )
+            curriculum_step = self._curriculum.current_step() if self._curriculum is not None else 0
+        elif forced_scenario is not None:
             scenario = forced_scenario
+            scenario_name_out = scenario.name
             curriculum_step = self._curriculum.current_step() if self._curriculum is not None else 0
         elif self._curriculum is not None:
             scenario, curriculum_step = self._curriculum.sample(self._np_random, self._scenarios)
+            scenario_name_out = scenario.name
         else:
             scenario = J.sample_scenario(self._np_random, self._scenarios)
+            scenario_name_out = scenario.name
             curriculum_step = 0
-        self._current_scenario_name = scenario.name
-        ics = J.apply_scenario(self._fdm, scenario, self._np_random)
+        self._current_scenario_name = scenario_name_out
+        if forced_ics is not None:
+            ics = J.apply_initial_conditions(self._fdm, forced_ics)
+        else:
+            ics = J.apply_scenario(self._fdm, scenario, self._np_random)
 
         self._step_idx = 0
         self._episode_curriculum_step = int(curriculum_step)
@@ -169,9 +191,10 @@ class StallRecoveryEnv(gym.Env):
         self._episode_initial_throttle = float(ics["throttle"])
         self._episode_altitude_loss_budget_ft = self._max_altitude_loss_budget_ft()
         self._update_episode_diagnostics(initial_raw)
+        self._reset_wall_clock_pacing()
 
         obs = self._read_obs()
-        info = {"scenario": scenario.name, "ics": ics, "curriculum_step": curriculum_step}
+        info = {"scenario": scenario_name_out, "ics": ics, "curriculum_step": curriculum_step}
         return obs, info
 
     def step(
@@ -194,6 +217,7 @@ class StallRecoveryEnv(gym.Env):
             if not self._fdm.run():
                 sim_failed = True
                 break
+            self._pace_wall_clock()
 
         obs = self._read_obs()
         raw = self._read_state_raw()
@@ -283,6 +307,7 @@ class StallRecoveryEnv(gym.Env):
         # FGFDMExec doesn't need explicit teardown; drop the reference so the
         # underlying object is destroyed before any next reset rebuilds it.
         self._fdm = None
+        self._realtime_next_tick = None
 
     # --- Observation / state ------------------------------------------------
 
@@ -425,6 +450,20 @@ class StallRecoveryEnv(gym.Env):
     def _accumulate_reward_terms(self, reward_terms: dict[str, float]) -> None:
         for key, value in reward_terms.items():
             self._episode_reward_terms[key] = self._episode_reward_terms.get(key, 0.0) + float(value)
+
+    def _reset_wall_clock_pacing(self) -> None:
+        if self._realtime_step_seconds is None:
+            self._realtime_next_tick = None
+            return
+        self._realtime_next_tick = time.monotonic()
+
+    def _pace_wall_clock(self) -> None:
+        if self._realtime_step_seconds is None or self._realtime_next_tick is None:
+            return
+        self._realtime_next_tick += self._realtime_step_seconds
+        sleep_for = self._realtime_next_tick - time.monotonic()
+        if sleep_for > 0.0:
+            time.sleep(sleep_for)
 
 
 # --- Config loading ----------------------------------------------------------
