@@ -91,6 +91,8 @@ class P:
     aileron_cmd        = "fcs/aileron-cmd-norm"
     rudder_cmd         = "fcs/rudder-cmd-norm"
     throttle_cmd       = "fcs/throttle-cmd-norm"
+    gear_cmd_norm      = "gear/gear-cmd-norm"
+    gear_pos_norm      = "gear/gear-pos-norm"
 
     # Initial conditions
     ic_h_sl_ft         = "ic/h-sl-ft"

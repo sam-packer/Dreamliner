@@ -167,7 +167,7 @@ uv run flightgear --aircraft c172p                     # Cessna 172P visual inst
 
 JSBSim drives the actual flight dynamics; the FG aircraft is only what you see on screen. Chase-cam (`v` in FG) is the
 clearest "watch the recovery maneuver" view; cockpit (`ctrl+v` to cycle) gives you the attitude indicator + airspeed
-tape.
+tape. Dreamliner launches FlightGear in `afternoon` lighting by default.
 
 ## FlightGear setup (one-time, ~5 min)
 
@@ -235,6 +235,8 @@ r), normal load factor, throttle, elevator/aileron/rudder positions, vertical sp
 
 **Action** (`Box(-1, 1, shape=(4,))`): elevator, aileron, rudder, throttle. Throttle is internally remapped from [-1, 1]
 to [0, 1] before being sent to JSBSim.
+
+All airborne resets start clean with the landing gear up.
 
 **Reward** (per agent step unless marked terminal):
 

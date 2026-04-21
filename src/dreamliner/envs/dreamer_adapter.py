@@ -28,12 +28,14 @@ class DreamerStallEnv:
         *,
         config: dict | str | Path | None = None,
         flightgear: bool = False,
+        gear_up: bool = True,
         curriculum_step_file: str | Path | None = None,
         disable_curriculum: bool = False,
     ):
         self._env = StallRecoveryEnv(
             config=config,
             flightgear=flightgear,
+            gear_up=gear_up,
             curriculum_step_file=curriculum_step_file,
             disable_curriculum=disable_curriculum,
         )

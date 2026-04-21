@@ -50,6 +50,7 @@ class StallRecoveryEnv(gym.Env):
         config: dict | str | Path | None = None,
         *,
         flightgear: bool = False,
+        gear_up: bool = True,
         curriculum_step_file: str | Path | None = None,
         disable_curriculum: bool = False,
     ):
@@ -62,6 +63,7 @@ class StallRecoveryEnv(gym.Env):
         self._aircraft: str = env_cfg["aircraft"]
         self._sim_dt_hz: int = int(env_cfg["sim_dt_hz"])
         self._agent_dt_hz: int = int(env_cfg["agent_dt_hz"])
+        self._gear_up: bool = bool(gear_up)
         self._realtime_step_seconds: float | None = (1.0 / self._sim_dt_hz) if flightgear else None
         self._realtime_next_tick: float | None = None
         if self._sim_dt_hz % self._agent_dt_hz != 0:
@@ -174,6 +176,9 @@ class StallRecoveryEnv(gym.Env):
             ics = J.apply_initial_conditions(self._fdm, forced_ics)
         else:
             ics = J.apply_scenario(self._fdm, scenario, self._np_random)
+        if self._gear_up:
+            self._fdm[P.gear_cmd_norm] = 0.0
+            self._fdm[P.gear_pos_norm] = 0.0
 
         self._step_idx = 0
         self._episode_curriculum_step = int(curriculum_step)
