@@ -27,16 +27,6 @@ _DEFAULT_AIRCRAFT = "737-300"
 # step — often 30-60s on first launch).
 _TELNET_PORT = 5501
 _TELNET_TIMEOUT_SECS = 2.0
-_TIME_OF_DAY_LOCAL_MINUTES: dict[str, int] = {
-    "real": -1,
-    "dawn": 5 * 60 + 30,
-    "morning": 7 * 60,
-    "noon": 12 * 60,
-    "afternoon": 15 * 60 + 20,
-    "dusk": 18 * 60 + 40,
-    "evening": 19 * 60 + 50,
-    "midnight": 0,
-}
 _VIEW_ALIAS_CANDIDATES: dict[str, tuple[str, ...]] = {
     "cockpit": ("Pilot View", "Captain View", "Captain", "Cockpit View", "Pilot"),
     "chase": ("Chase View", "Helicopter View", "Chase"),
@@ -110,92 +100,6 @@ def set_property(
     else:
         value_text = str(value)
     _telnet_command(f"set {path} {value_text}", port=port, timeout=timeout, expect_response=False)
-
-
-def _get_float_property(
-    path: str,
-    *,
-    port: int = _TELNET_PORT,
-    timeout: float = _TELNET_TIMEOUT_SECS,
-) -> float | None:
-    raw = get_property(path, port=port, timeout=timeout)
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        return None
-
-
-def _set_daytime_gmt(
-    preset: str,
-    *,
-    port: int = _TELNET_PORT,
-    timeout: float = _TELNET_TIMEOUT_SECS,
-    invert_offset: bool = False,
-) -> None:
-    current_gmt = get_property("/sim/time/gmt", port=port, timeout=timeout)
-    if current_gmt is None:
-        return
-    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}$", current_gmt)
-    if match is None:
-        return
-    target_local_minutes = _TIME_OF_DAY_LOCAL_MINUTES[preset]
-    local_offset_seconds = _get_float_property("/sim/time/local-offset", port=port, timeout=timeout) or 0.0
-    offset_seconds = -local_offset_seconds if invert_offset else local_offset_seconds
-    target_utc_seconds = int((target_local_minutes * 60 - offset_seconds) % (24 * 60 * 60))
-    hour = target_utc_seconds // 3600
-    minute = (target_utc_seconds % 3600) // 60
-    second = target_utc_seconds % 60
-    year, month, day = match.groups()
-    set_property(
-        "/sim/time/gmt",
-        f"{year}-{month}-{day}T{hour:02d}:{minute:02d}:{second:02d}",
-        port=port,
-        timeout=timeout,
-    )
-
-
-def _parse_clock_minutes(text: str | None) -> int | None:
-    if text is None:
-        return None
-    match = re.match(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?", text)
-    if match is None:
-        return None
-    hour = int(match.group(1))
-    minute = int(match.group(2))
-    return hour * 60 + minute
-
-
-def force_time_of_day(
-    preset: str = "afternoon",
-    *,
-    port: int = _TELNET_PORT,
-    timeout: float = _TELNET_TIMEOUT_SECS,
-    settle_seconds: float = 0.2,
-    attempts: int = 3,
-) -> None:
-    if preset not in _TIME_OF_DAY_LOCAL_MINUTES:
-        raise ValueError(f"Unsupported FlightGear time-of-day preset: {preset}")
-    if preset == "real":
-        return
-    for _ in range(attempts):
-        set_property("/sim/multiplay/lag/master", 0, port=port, timeout=timeout)
-        set_property("/sim/time/simple-time/enabled", 1, port=port, timeout=timeout)
-        set_property("/sim/time/warp-delta", 0, port=port, timeout=timeout)
-        set_property("/sim/time/warp-easing", 0, port=port, timeout=timeout)
-        _set_daytime_gmt(preset, port=port, timeout=timeout)
-        time.sleep(settle_seconds)
-        local_minutes = _parse_clock_minutes(get_property("/sim/time/local-time-string", port=port, timeout=timeout))
-        target_local_minutes = _TIME_OF_DAY_LOCAL_MINUTES[preset]
-        if local_minutes is not None:
-            delta = min(
-                (local_minutes - target_local_minutes) % (24 * 60),
-                (target_local_minutes - local_minutes) % (24 * 60),
-            )
-            if delta > 45:
-                _set_daytime_gmt(preset, port=port, timeout=timeout, invert_offset=True)
-                time.sleep(settle_seconds)
 
 
 def list_available_views(
@@ -287,8 +191,6 @@ def configure_inspection_view(
 def _build_fg_args(aircraft: str) -> list[str]:
     return [
         f"--aircraft={aircraft}",
-        "--ignore-autosave",
-        "--timeofday=afternoon",
         "--native-fdm=socket,in,60,,5550,udp",
         f"--telnet=socket,bi,60,,{_TELNET_PORT},tcp",
         "--fdm=external",

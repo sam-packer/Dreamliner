@@ -34,12 +34,11 @@ from tensordict import TensorDict  # noqa: E402
 
 from dreamliner.envs import DreamerStallEnv  # noqa: E402
 from dreamliner.evaluation._loader import find_latest_run, load_run, resolve_run_env_config  # noqa: E402
-from dreamliner.utils.flightgear import configure_inspection_view, force_time_of_day, launch_flightgear, wait_until_ready  # noqa: E402
+from dreamliner.utils.flightgear import configure_inspection_view, launch_flightgear, wait_until_ready  # noqa: E402
 
 _FG_READY_TIMEOUT_SECS = 180.0
 _DEFAULT_FG_REPLAY_VIEWS = ("cockpit", "chase")
 _DEFAULT_FG_COCKPIT_FOV = 90.0
-_DEFAULT_FG_TIME_OF_DAY = "afternoon"
 _SUCCESS_NARRATION = "Success"
 
 
@@ -171,7 +170,6 @@ def _rollout_single_episode(
     replay_count: int | None = None,
     replay_view: str | None = None,
     replay_view_name: str | None = None,
-    flightgear_time_of_day: str | None = None,
 ) -> dict:
     agent_dt_hz = env.agent_dt_hz
     success_hold_seconds = env.success_hold_seconds
@@ -182,8 +180,6 @@ def _rollout_single_episode(
     if initial_conditions is not None:
         reset_options["initial_conditions"] = initial_conditions
     obs = env.reset(options=reset_options or None)
-    if flightgear_time_of_day is not None:
-        force_time_of_day(flightgear_time_of_day)
     agent_state = agent.get_initial_state(1)
     reset_info = dict(env.last_reset_info)
     ics = dict(reset_info.get("ics") or {})
@@ -297,7 +293,6 @@ def rollout_episodes(
     announce_success: bool = False,
     scenario: str | None = None,
     status_interval_steps: int | None = None,
-    flightgear_time_of_day: str | None = None,
 ) -> list[dict]:
     """Run ``num_episodes`` greedy rollouts; return per-episode trajectory dicts."""
     episodes: list[dict] = []
@@ -311,7 +306,6 @@ def rollout_episodes(
             scenario=scenario,
             initial_conditions=None,
             status_interval_steps=status_interval_steps,
-            flightgear_time_of_day=flightgear_time_of_day,
         )
         episodes.append(log)
         if announce_success and log["outcome"] == "success":
@@ -331,7 +325,6 @@ def rollout_flightgear_replays(
     scenario: str | None = None,
     progress: bool = True,
     status_interval_steps: int | None = None,
-    flightgear_time_of_day: str | None = None,
 ) -> list[dict]:
     episodes: list[dict] = []
     replay_count = len(replay_views)
@@ -356,7 +349,6 @@ def rollout_flightgear_replays(
                 replay_count=replay_count,
                 replay_view=requested_view,
                 replay_view_name=actual_view,
-                flightgear_time_of_day=flightgear_time_of_day,
             )
             if replay_index == 0:
                 replay_scenario = str(log["scenario"])
@@ -392,12 +384,10 @@ def main() -> None:
         print(f"Launched FlightGear (PID {proc.pid}, visual={args.fg_aircraft}); "
               f"waiting for scenery load (up to {_FG_READY_TIMEOUT_SECS:.0f}s)...")
         elapsed = wait_until_ready(timeout=_FG_READY_TIMEOUT_SECS)
-        force_time_of_day(_DEFAULT_FG_TIME_OF_DAY)
         print(f"FlightGear ready after {elapsed:.1f}s; starting agent rollouts...")
     elif args.flightgear:
         print("FlightGear streaming -> UDP localhost:5550. Waiting for FG to be ready...")
         elapsed = wait_until_ready(timeout=_FG_READY_TIMEOUT_SECS)
-        force_time_of_day(_DEFAULT_FG_TIME_OF_DAY)
         print(f"FlightGear ready after {elapsed:.1f}s; starting agent rollouts...")
 
     replay_views = _parse_view_sequence(args.fg_replay_views)
@@ -423,7 +413,6 @@ def main() -> None:
                 cockpit_fov=args.fg_cockpit_fov,
                 scenario=args.scenario,
                 status_interval_steps=env.agent_dt_hz,
-                flightgear_time_of_day=_DEFAULT_FG_TIME_OF_DAY,
             )
         else:
             episodes = rollout_episodes(
@@ -434,7 +423,6 @@ def main() -> None:
                 announce_success=args.flightgear,
                 scenario=args.scenario,
                 status_interval_steps=env.agent_dt_hz if args.flightgear else None,
-                flightgear_time_of_day=_DEFAULT_FG_TIME_OF_DAY if args.flightgear else None,
             )
     finally:
         env.close()
