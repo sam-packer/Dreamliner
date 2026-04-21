@@ -1,13 +1,14 @@
 """Evaluate a trained DreamerV3 run: learning curves + per-scenario recovery stats.
 
-    uv run evaluate                              # latest run: plots + 200 eval rollouts per checkpoint (best and latest)
+    uv run evaluate                              # latest run: plots + 200 eval rollouts per checkpoint
     uv run evaluate runs/dreamer/baseline        # specific run
     uv run evaluate --episodes 500               # bigger eval sample
     uv run evaluate --checkpoint best            # only best.pt
     uv run evaluate --checkpoint latest          # only latest.pt
+    uv run evaluate --checkpoint last_good       # only last_good.pt
     uv run evaluate --no-eval                    # plots only, skip rollouts
 
-Both checkpoints face the same scenario draws (env is re-seeded per checkpoint)
+Requested checkpoints face the same scenario draws (env is re-seeded per checkpoint)
 so outcomes are directly comparable.
 
 Outputs land under ``<logdir>/analysis/``:
@@ -36,9 +37,9 @@ def parse_args() -> argparse.Namespace:
                    help="runs/dreamer/<run> dir. Omit to auto-pick the latest run.")
     p.add_argument("--episodes", type=int, default=200,
                    help="Greedy eval episodes for recovery-metric histograms (default: 200).")
-    p.add_argument("--checkpoint", choices=["best", "latest"], nargs="+",
-                   default=["best", "latest"],
-                   help="Which checkpoint(s) to roll out (default: both).")
+    p.add_argument("--checkpoint", choices=["best", "latest", "last_good"], nargs="+",
+                   default=["best", "latest", "last_good"],
+                   help="Which checkpoint(s) to roll out (default: best latest last_good).")
     p.add_argument("--no-eval", action="store_true",
                    help="Skip rolling out the agent; only plot TensorBoard scalars.")
     return p.parse_args()
@@ -180,7 +181,11 @@ def main() -> None:
     for ckpt in args.checkpoint:
         print(f"\n=== Evaluating {ckpt}.pt ===")
         print(f"Loading agent from {logdir} ...")
-        agent, config = load_run(logdir, prefer=ckpt)
+        try:
+            agent, config = load_run(logdir, prefer=ckpt)
+        except FileNotFoundError as exc:
+            print(f"Skipping {ckpt}.pt: {exc}")
+            continue
         env = DreamerStallEnv(seed=env_seed, config=env_config, disable_curriculum=True)
         try:
             print(f"Running {args.episodes} greedy eval episodes from {ckpt}.pt ...")

@@ -121,7 +121,7 @@ scenarios:
 # Targets used by the reward / success criteria.
 targets:
   alpha_deg_safe: 10.0          # below this alpha is "out of stall"
-  alpha_deg_threshold: 12.0     # shaped reward target
+  alpha_deg_threshold: 10.0     # shaped reward target; kept aligned with success gate
   airspeed_kcas_min: 150.0      # above this is "recovered" (clean 737, approx)
   roll_deg_tolerance: 10.0
   vertical_speed_fps_min: -50.0 # don't require climbing - just controlled descent
@@ -132,15 +132,14 @@ targets:
   max_altitude_loss_ft: 2000.0
   max_altitude_loss_fraction_of_start: 0.25
 
-# Reward weights. Per-step terms are summed each agent step. Success/crash
-# terms are terminal, and the terminal altitude-loss penalty is applied only
-# on failed episodes.
+# Reward weights. Per-step terms are summed each agent step; terminal terms
+# are applied once when the episode ends (crash, success, or truncation).
 reward:
   alpha_penalty_per_deg: 0.05         # negative for alpha above target
-  altitude_loss_penalty_per_ft: 0.001 # per-step incremental altitude-loss shaping
-  altitude_loss_terminal_penalty_per_ft: 0.1 # one-shot on failed episodes only
+  altitude_loss_penalty_per_ft: 0.001 # per-step shaping signal (small)
+  altitude_loss_terminal_penalty_per_ft: 0.1 # one-shot at episode end (dominant)
   roll_penalty_per_deg: 0.05
-  airspeed_bonus_per_kt: 0.01         # positive once above stall speed
+  airspeed_bonus_per_kt: 0.01         # magnitude for speed-deficit penalty below recovery airspeed
   control_smoothness_penalty: 0.1     # multiplied by mean |delta action|
   crash_penalty: -100.0
   success_bonus: 500.0

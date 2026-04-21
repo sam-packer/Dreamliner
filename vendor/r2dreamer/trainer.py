@@ -129,7 +129,16 @@ def _log_window_diagnostics(logger, episodes):
         logger.scalar("train_window/curriculum_step_min", min(curriculum_steps))
         logger.scalar("train_window/curriculum_step_max", max(curriculum_steps))
 
-    scenario_keys = sorted({key for row in rows for key in row if key.startswith("scenario_")})
+    # `scenario_name` is a human-readable label added alongside the numeric
+    # one-hot `scenario_<name>` flags; exclude it from numeric aggregation.
+    scenario_keys = sorted(
+        {
+            key
+            for row in rows
+            for key in row
+            if key.startswith("scenario_") and key != "scenario_name"
+        }
+    )
     total = float(len(rows))
     for scenario_key in scenario_keys:
         scenario_rows = [row for row in rows if row.get(scenario_key, 0.0) > 0.5]
@@ -224,7 +233,10 @@ class OnlineTrainer:
             # We keep the observation and the action that produced it together.
             trans["action"] = act
             if len(cache) < self.batch_length:
-                cache.append(trans.clone())
+                # Terminal diagnostics are sparse, so keep them out of the
+                # video/open-loop cache to preserve a stackable key set.
+                log_keys = [key for key in trans.keys() if key.startswith("log_")]
+                cache.append((trans.exclude(*log_keys) if log_keys else trans).clone())
             # (B, A)
             act, agent_state = agent.act(trans, agent_state, eval=True)
             returns += trans["reward"][:, 0] * ~once_done

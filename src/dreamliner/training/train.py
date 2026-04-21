@@ -1,15 +1,17 @@
 """DreamerV3 training on StallRecoveryEnv.
 
-    uv run train                                       # quick profile (~1.5-2 hr)
-    uv run train --profile good                        # good profile (~7-8 hr)
-    uv run train --profile best                        # best profile (~35-40 hr)
+    uv run train                                       # quick profile (~50 min)
+    uv run train --profile good                        # good profile (~3.3 hr)
+    uv run train --profile best                        # best profile (~10.5 hr)
     uv run train --run-name baseline                   # custom output dir name
     uv run train --resume-from runs/dreamer/prior --run-name continued
 
 Outputs land under ``runs/dreamer/<run-name>/``: TensorBoard events,
 ``latest.pt`` (saved every 10k steps + on Ctrl+C), ``best.pt`` (saved when the
-fixed no-curriculum validation suite improves), ``config.yaml`` and
-``env_config.yaml`` (for play/evaluate to rebuild the exact run environment).
+fixed no-curriculum validation suite improves), ``last_good.pt`` (most recent
+validation checkpoint with success_rate >= 95% and crash_rate == 0%), and
+their JSON sidecars plus ``config.yaml`` / ``env_config.yaml`` (for
+play/evaluate to rebuild the exact run environment).
 """
 
 from __future__ import annotations
@@ -73,7 +75,7 @@ PROFILES: dict[str, dict] = {
     "quick": {
         "total_steps":      250_000,
         "model_size":       "100M",
-        "action_repeat":    1,
+        "action_repeat":    2,
         "num_envs":         16,
         "eval_episodes":    16,
         "batch_size":       64,
@@ -88,7 +90,7 @@ PROFILES: dict[str, dict] = {
     "good": {
         "total_steps":      1_000_000,
         "model_size":       "100M",
-        "action_repeat":    1,
+        "action_repeat":    2,
         "num_envs":         32,
         "eval_episodes":    16,
         "batch_size":       64,
@@ -101,9 +103,9 @@ PROFILES: dict[str, dict] = {
         "time_limit":       600,
     },
     "best": {
-        "total_steps":      5_000_000,
+        "total_steps":      3_000_000,
         "model_size":       "100M",
-        "action_repeat":    1,
+        "action_repeat":    2,
         "num_envs":         32,
         "eval_episodes":    16,
         "batch_size":       64,
@@ -121,6 +123,8 @@ _DEVICE = "cuda:0"
 _SEED = 0
 _VALIDATION_EPISODES_MIN = 36
 _VALIDATION_SEED = 12345
+_LAST_GOOD_SUCCESS_RATE = 0.95
+_LAST_GOOD_CRASH_RATE = 0.0
 
 
 class _TqdmLoggingHandler(logging.Handler):
@@ -614,9 +618,9 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Profiles (RTX 5090 + Ryzen 9 9950X3D timings):\n"
-            "  quick   250k steps, 100M model, 16 envs, ~1.5-2 hr, ~22-25 GB VRAM  (default)\n"
-            "  good    1M steps,   100M model, 32 envs, ~7-8 hr,   ~22-25 GB VRAM\n"
-            "  best    5M steps,   100M model, 32 envs, ~35-40 hr, ~22-25 GB VRAM\n"
+            "  quick   250k steps, 100M model, 16 envs, ~50 min,   ~22-25 GB VRAM  (default)\n"
+            "  good    1M steps,   100M model, 32 envs, ~3.3 hr,   ~22-25 GB VRAM\n"
+            "  best    3M steps,   100M model, 32 envs, ~10.5 hr,  ~22-25 GB VRAM\n"
         ),
     )
     p.add_argument("--profile", choices=list(PROFILES), default="quick",
@@ -731,7 +735,9 @@ def main() -> None:
 
     final_path = logdir / "latest.pt"
     best_path  = logdir / "best.pt"
+    last_good_path = logdir / "last_good.pt"
     best_validation = {"key": None, "step": -1, "metrics": None}
+    last_good_validation = {"step": -1, "metrics": None}
     validation_episodes = max(_VALIDATION_EPISODES_MIN, int(config.env.eval_episode_num))
     validation_jsonl_path = logdir / "validation.jsonl"
     validation_episode_jsonl_path = logdir / "validation_episode_diagnostics.jsonl"
@@ -763,6 +769,7 @@ def main() -> None:
         log.info("Checkpoint saved at step %d -> %s", step, final_path)
 
     best_json_path = logdir / "best.json"
+    last_good_json_path = logdir / "last_good.json"
 
     def on_validation(step: int, _score: float, agent_ref) -> None:
         metrics = _run_fixed_validation(agent_ref, env_config_path, validation_episodes, config.device)
@@ -845,6 +852,57 @@ def main() -> None:
                     "timestamp": timestamp,
                     **record,
                 }) + "\n")
+
+        if (
+            metrics["success_rate"] >= _LAST_GOOD_SUCCESS_RATE
+            and metrics["crash_rate"] <= _LAST_GOOD_CRASH_RATE
+        ):
+            last_good_validation["step"] = step
+            last_good_validation["metrics"] = metrics
+            _write_ckpt(
+                last_good_path,
+                step,
+                agent_ref,
+                score=metrics["mean_return"],
+                metadata={
+                    "validation_success_rate": metrics["success_rate"],
+                    "validation_crash_rate": metrics["crash_rate"],
+                    "validation_timeout_rate": metrics["timeout_rate"],
+                    "validation_mean_altitude_loss_ft": metrics["mean_altitude_loss_ft"],
+                    "validation_median_altitude_loss_ft": metrics["median_altitude_loss_ft"],
+                    "validation_mean_length": metrics["mean_length"],
+                },
+            )
+            last_good_json_path.write_text(json.dumps({
+                "step":                             int(step),
+                "eval_score":                       float(metrics["mean_return"]),
+                "validation_success_rate":          float(metrics["success_rate"]),
+                "validation_crash_rate":            float(metrics["crash_rate"]),
+                "validation_timeout_rate":          float(metrics["timeout_rate"]),
+                "validation_mean_return":           float(metrics["mean_return"]),
+                "validation_median_return":         float(metrics["median_return"]),
+                "validation_mean_altitude_loss_ft": float(metrics["mean_altitude_loss_ft"]),
+                "validation_median_altitude_loss_ft": float(metrics["median_altitude_loss_ft"]),
+                "validation_mean_length":           float(metrics["mean_length"]),
+                "validation_episodes":              int(metrics["episodes"]),
+                "run_name":                         run_name,
+                "logdir":                           str(logdir),
+                "timestamp":                        datetime.now().isoformat(timespec="seconds"),
+                "model_size":                       profile["model_size"],
+                "selection_metric":                 (
+                    f"most_recent(success_rate>={_LAST_GOOD_SUCCESS_RATE:.2f},"
+                    f"crash_rate<={_LAST_GOOD_CRASH_RATE:.1f})"
+                ),
+            }, indent=2), encoding="utf-8")
+            log.info(
+                "Updated last_good at step %d -> %s "
+                "(success=%.1f%% crash=%.1f%% median_alt_loss=%.0fft)",
+                step,
+                last_good_path,
+                metrics["success_rate"] * 100.0,
+                metrics["crash_rate"] * 100.0,
+                metrics["median_altitude_loss_ft"],
+            )
 
         key = _validation_key(metrics)
         if best_validation["key"] is None or key > best_validation["key"]:
@@ -963,6 +1021,18 @@ def main() -> None:
             metrics["mean_return"],
             best_validation["step"],
             best_path,
+        )
+    if last_good_validation["step"] >= 0 and last_good_validation["metrics"] is not None:
+        metrics = last_good_validation["metrics"]
+        log.info(
+            "Last good validation: success=%.1f%% crash=%.1f%% median_alt_loss=%.0fft "
+            "mean_return=%.2f at step %d -> %s",
+            metrics["success_rate"] * 100.0,
+            metrics["crash_rate"] * 100.0,
+            metrics["median_altitude_loss_ft"],
+            metrics["mean_return"],
+            last_good_validation["step"],
+            last_good_path,
         )
     if interrupted:
         log.info("Interrupted at step %d. Resume with: --resume-from %s", final_step, logdir)

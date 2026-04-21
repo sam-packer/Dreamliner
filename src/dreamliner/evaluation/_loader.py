@@ -47,6 +47,7 @@ def load_run(
 
     ``prefer="best"`` (default) loads ``best.pt`` if it exists, else falls back
     to ``latest.pt``. ``prefer="latest"`` always loads ``latest.pt``.
+    ``prefer="last_good"`` requires ``last_good.pt``.
     Returns the agent already on ``device`` (defaults to whatever the run
     trained on) in inference mode, plus the config it was trained with.
     """
@@ -55,12 +56,19 @@ def load_run(
     if not cfg_path.exists():
         raise FileNotFoundError(f"missing {cfg_path}")
 
-    candidates = (
-        ["best.pt", "latest.pt"] if prefer == "best" else ["latest.pt", "best.pt"]
-    )
+    if prefer == "best":
+        candidates = ["best.pt", "latest.pt"]
+    elif prefer == "latest":
+        candidates = ["latest.pt", "best.pt"]
+    elif prefer == "last_good":
+        candidates = ["last_good.pt"]
+    else:
+        raise ValueError(f"unsupported checkpoint preference: {prefer}")
     ckpt_path = next((logdir / name for name in candidates if (logdir / name).exists()), None)
     if ckpt_path is None:
-        raise FileNotFoundError(f"no checkpoint (best.pt or latest.pt) in {logdir}")
+        raise FileNotFoundError(
+            f"no checkpoint matching prefer={prefer!r} in {logdir}"
+        )
 
     config = OmegaConf.load(cfg_path)
     if device is not None:

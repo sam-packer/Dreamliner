@@ -94,7 +94,6 @@ class StallRecoveryEnv(gym.Env):
         self._np_random: np.random.Generator | None = None
         self._step_idx: int = 0
         self._start_altitude_ft: float = 0.0
-        self._prev_altitude_ft: float = 0.0
         self._episode_curriculum_step: int = 0
         self._stable_streak: int = 0
         self._prev_action: np.ndarray = np.zeros(4, dtype=np.float32)
@@ -158,7 +157,6 @@ class StallRecoveryEnv(gym.Env):
         self._episode_curriculum_step = int(curriculum_step)
         self._stable_streak = 0
         self._start_altitude_ft = float(self._fdm[P.altitude_ft])
-        self._prev_altitude_ft = self._start_altitude_ft
         self._prev_action = np.zeros(4, dtype=np.float32)
         self._reset_episode_diagnostics()
         initial_raw = self._read_state_raw()
@@ -217,10 +215,10 @@ class StallRecoveryEnv(gym.Env):
         truncated = bool(self._step_idx >= self._max_episode_steps)
 
         # Terminal altitude-loss penalty: one lump at episode end proportional
-        # to total ft lost from start on failed episodes. Keeps the per-step
-        # alt term small (pure gradient signal) while a failed deep recovery
-        # still carries a large cost.
-        if (terminated or truncated) and not success:
+        # to total ft lost from start. Keeps the per-step alt term small (pure
+        # gradient signal) while the terminal term carries the real cost of a
+        # deep recovery. Applied on success, crash, and timeout.
+        if terminated or truncated:
             final_alt_loss = max(0.0, self._start_altitude_ft - raw["altitude_ft"])
             terminal_altitude_term = -self._reward["altitude_loss_terminal_penalty_per_ft"] * final_alt_loss
             reward += terminal_altitude_term
@@ -229,7 +227,6 @@ class StallRecoveryEnv(gym.Env):
             reward_terms["altitude_terminal"] = 0.0
         self._accumulate_reward_terms(reward_terms)
 
-        self._prev_altitude_ft = raw["altitude_ft"]
         self._prev_action = action
         timeout = bool(truncated and not terminated)
         outcome = "success" if success else "crash" if crashed else "timeout" if timeout else "running"
@@ -363,16 +360,17 @@ class StallRecoveryEnv(gym.Env):
         r = self._reward
         t = self._targets
 
-        alpha_excess = max(0.0, raw["alpha_deg"] - t["alpha_deg_threshold"])
+        alpha_target_deg = min(t["alpha_deg_threshold"], t["alpha_deg_safe"])
+        alpha_excess = max(0.0, raw["alpha_deg"] - alpha_target_deg)
         alpha_term = -r["alpha_penalty_per_deg"] * alpha_excess
 
-        incremental_altitude_loss = max(0.0, self._prev_altitude_ft - raw["altitude_ft"])
-        alt_term = -r["altitude_loss_penalty_per_ft"] * incremental_altitude_loss
+        altitude_loss = max(0.0, self._start_altitude_ft - raw["altitude_ft"])
+        alt_term = -r["altitude_loss_penalty_per_ft"] * altitude_loss
 
         roll_term = -r["roll_penalty_per_deg"] * abs(np.degrees(raw["roll_rad"]))
 
-        speed_excess = max(0.0, raw["vc_kts"] - t["airspeed_kcas_min"])
-        speed_term = r["airspeed_bonus_per_kt"] * speed_excess
+        speed_deficit = max(0.0, t["airspeed_kcas_min"] - raw["vc_kts"])
+        speed_term = -r["airspeed_bonus_per_kt"] * speed_deficit
 
         delta = np.abs(action - self._prev_action).mean()
         smooth_term = -r["control_smoothness_penalty"] * float(delta)

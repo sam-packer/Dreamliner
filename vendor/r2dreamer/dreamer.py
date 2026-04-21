@@ -262,7 +262,7 @@ class Dreamer(nn.Module):
         feat = self._frozen_rssm.get_feat(stoch, deter)
         action_dist = self._frozen_actor(feat)
         # (B, A)
-        action = action_dist.mode if eval else action_dist.rsample()
+        action = self._bound_action(action_dist.mode if eval else action_dist.rsample())
         return action, TensorDict(
             {"stoch": stoch, "deter": deter, "prev_action": action},
             batch_size=state.batch_size,
@@ -273,6 +273,12 @@ class Dreamer(nn.Module):
         stoch, deter = self.rssm.initial(B)
         action = torch.zeros(B, self.act_dim, dtype=torch.float32, device=self.device)
         return TensorDict({"stoch": stoch, "deter": deter, "prev_action": action}, batch_size=(B,))
+
+    def _bound_action(self, action):
+        if self.act_discrete:
+            return action
+        # Keep replay/model actions on the same domain the env executes.
+        return torch.clamp(action, -1.0, 1.0)
 
     @torch.no_grad()
     def video_pred(self, data, initial):
@@ -560,7 +566,7 @@ class Dreamer(nn.Module):
             # (B, F)
             feat = self._frozen_rssm.get_feat(stoch, deter)
             # (B, A)
-            action = self._frozen_actor(feat).rsample()
+            action = self._bound_action(self._frozen_actor(feat).rsample())
             # Append feat and its corresponding sampled action at the same time step.
             feats.append(feat)
             actions.append(action)

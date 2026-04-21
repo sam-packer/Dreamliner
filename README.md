@@ -56,9 +56,9 @@ Four commands. Each defaults to "do the obvious thing" and auto-discovers the mo
 ### Train
 
 ```bash
-uv run train                                           # quick profile (~1.5-2 hr)
-uv run train --profile good                            # good profile (~7-8 hr)
-uv run train --profile best                            # best profile (~35-40 hr)
+uv run train                                           # quick profile (~50 min)
+uv run train --profile good                            # good profile (~3.3 hr)
+uv run train --profile best                            # best profile (~10.5 hr)
 uv run train --run-name baseline                       # custom output dir name
 uv run train --resume-from runs/dreamer/prior --run-name continued
 ```
@@ -69,7 +69,7 @@ Three profiles (RTX 5090 + Ryzen 9 9950X3D timings):
 |---------|-------|-------|------|-------------|----------|
 | `quick` | 250 k | 100 M | 16   | 50 minutes  | 22-25 GB |
 | `good`  | 1 M   | 100 M | 32   | ~3.3 hours  | 22-25 GB |
-| `best`  | 5 M   | 100 M | 32   | ~17.5 hours | 22-25 GB |
+| `best`  | 3 M   | 100 M | 32   | ~10.5 hours | 22-25 GB |
 
 `good` is `quick` extended: same model, same VRAM load, 4× more environment steps and 2× the parallel env workers to
 saturate both GPU compute and CPU physics threads. For state-based tasks at this scale (15-dim obs, 4-dim action), more
@@ -77,16 +77,20 @@ data dominates more model capacity — a 200M model variant exists but didn't ju
 keeps the same 100M model and the same batch/env settings as `good` so VRAM stays in the same band on a 5090; it only
 extends the step budget and scales eval/log/checkpoint cadence so the run stays manageable.
 
-`action_repeat` is intentionally set to `1` for this env. The custom JSBSim task is not wrapped with an action-repeat
-wrapper, so one logged step now means one real policy decision (100 ms of sim time).
+`action_repeat` is intentionally set to `2` for these Dreamer profiles so run budgets, eval cadence, and throughput
+numbers stay aligned with the tuned training runs. The true control cadence is still defined inside the env by
+`sim_dt_hz=120` and `agent_dt_hz=10`, so the policy still makes one real decision every 100 ms of sim time; the
+Dreamer-side `action_repeat` here is a trainer accounting knob rather than an extra JSBSim action-repeat wrapper.
 
 Tuning knobs (batch size, train ratio, buffer size, eval cadence, etc.) live in the `PROFILES` dict in
 `src/dreamliner/training/train.py`. Edit there if you need something off-menu.
 
 Outputs land under `runs/dreamer/<run-name>/`. `latest.pt` is saved every 10 k env steps, on clean exit, **and on Ctrl+C
 ** (interrupts don't lose the model). `best.pt` is saved whenever the fixed no-curriculum validation suite improves on
-a deterministic, per-scenario validation sweep, with a `best.json` sidecar (step, validation metrics, timestamp). Each
-run also snapshots its exact env config to
+a deterministic, per-scenario validation sweep, with a `best.json` sidecar (step, validation metrics, timestamp).
+`last_good.pt` is saved whenever validation meets the reliability floor (`success_rate >= 95%` and `crash_rate == 0%`),
+and always tracks the most recent checkpoint meeting that bar, with a `last_good.json` sidecar. Each run also snapshots
+its exact env config to
 `env_config.yaml`, and `play` / `evaluate` rebuild from that snapshot rather than whatever happens to be in
 `configs/default.yaml` later.
 
@@ -111,8 +115,9 @@ Per-episode line goes to stdout: scenario, return, altitude lost, step count, ou
 
 ### Evaluate
 
-Learning curves + per-scenario recovery stats over many rollouts. By default runs 200 greedy episodes against **both**
-`best.pt` and `latest.pt`, re-seeding the env per checkpoint so they face the same scenario draws.
+Learning curves + per-scenario recovery stats over many rollouts. By default runs 200 greedy episodes against
+`best.pt`, `latest.pt`, and `last_good.pt` when present, re-seeding the env per checkpoint so they face the same
+scenario draws.
 
 ```bash
 uv run evaluate                                        # latest run: plots + 200 rollouts per checkpoint
@@ -120,6 +125,7 @@ uv run evaluate runs/dreamer/baseline                  # specific run
 uv run evaluate --episodes 500                         # bigger eval sample
 uv run evaluate --checkpoint best                      # only best.pt
 uv run evaluate --checkpoint latest                    # only latest.pt
+uv run evaluate --checkpoint last_good                 # only last_good.pt
 uv run evaluate --no-eval                              # plots only, skip rollouts
 ```
 
@@ -213,11 +219,11 @@ to [0, 1] before being sent to JSBSim.
 **Reward** (per agent step unless marked terminal):
 
 - penalty for alpha above the safe threshold
-- small per-step penalty for incremental altitude loss (shaping signal)
+- small per-step penalty for cumulative altitude loss (shaping signal)
 - penalty for roll away from wings-level
-- bonus for airspeed above stall speed
+- penalty for airspeed below the recovery target
 - penalty for jerky control inputs (smoothness regularizer)
-- **terminal** one-shot penalty at episode end proportional to final ft lost from start on failed episodes
+- **terminal** one-shot penalty at episode end proportional to final ft lost from start
 - **terminal** one-shot **-100** on crash
 - **terminal** one-shot **+500** when stable flight is held for 5 s
 
