@@ -106,7 +106,9 @@ Roll out a trained policy (greedy) against random stall scenarios.
 uv run play                                            # 5 episodes, latest run, no FG
 uv run play runs/dreamer/baseline                      # specific run
 uv run play --episodes 10                              # more rollouts
+uv run play --demo                                     # stall/upset scenarios once, in config order
 uv run play --flightgear                               # with FlightGear (auto-launch)
+uv run play --flightgear --demo                        # cockpit/chase replay for each stall/upset scenario once
 uv run play --flightgear --no-fg-launch                # FG already running; just stream
 uv run play --flightgear --episodes 1 --scenario turning_stall
 uv run play --flightgear --episodes 1 --scenario turning_stall --fg-replay-views cockpit,chase
@@ -123,6 +125,11 @@ uv run play --out trajectories.json                    # save per-episode log
 alpha, pitch, roll, beta, yaw rate, throttle), then a terminal summary with sim-time duration and final state. In
 FlightGear mode it also prints one telemetry line per simulated second so you can tell whether the aircraft is still
 stalled and how close it is to the 5-second recovery hold.
+
+`--demo` switches `play` from curriculum/random sampling to a deterministic showcase pass: it runs the actual
+stall/upset scenarios exactly once each, in config order (`high_alpha_entry`, `wings_level_stall`, `turning_stall`,
+`nose_high_upset`, `incipient_spin`). It intentionally skips the safe rehearsal scenarios (`cruise`, `gentle_turn`,
+`pitch_recovery`, `slow_flight`).
 
 With `--flightgear`, each logical episode is replayed through the configured inspection view sequence using the exact
 same sampled initial conditions. The default sequence is `cockpit,chase`. Use `--fg-replay-views` to

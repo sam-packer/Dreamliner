@@ -99,6 +99,8 @@ class P:
     ic_vc_kts          = "ic/vc-kts"
     ic_alpha_deg       = "ic/alpha-deg"
     ic_beta_deg        = "ic/beta-deg"
+    ic_lat_geod_deg    = "ic/lat-geod-deg"
+    ic_long_gc_deg     = "ic/long-gc-deg"
     ic_phi_deg         = "ic/phi-deg"
     ic_theta_deg       = "ic/theta-deg"
     ic_psi_true_deg    = "ic/psi-true-deg"
@@ -276,6 +278,8 @@ def _u(rng: np.random.Generator, lo: float, hi: float) -> float:
 def apply_initial_conditions(
     fdm: jsbsim.FGFDMExec,
     ics: Mapping[str, float],
+    *,
+    location: tuple[float, float] | None = None,
 ) -> dict[str, float]:
     """Write exact initial conditions to ``fdm`` and call ``run_ic()``."""
     altitude = float(ics["altitude_ft"])
@@ -293,6 +297,10 @@ def apply_initial_conditions(
     fdm[P.ic_theta_deg] = pitch
     fdm[P.ic_phi_deg] = roll
     fdm[P.ic_beta_deg] = beta
+    if location is not None:
+        latitude_deg, longitude_deg = location
+        fdm[P.ic_lat_geod_deg] = latitude_deg
+        fdm[P.ic_long_gc_deg] = longitude_deg
     fdm[P.ic_psi_true_deg] = 0.0
     fdm[P.ic_p_rad_sec] = 0.0
     fdm[P.ic_q_rad_sec] = 0.0
@@ -321,6 +329,8 @@ def apply_scenario(
     fdm: jsbsim.FGFDMExec,
     scenario: ScenarioSpec,
     rng: np.random.Generator,
+    *,
+    location: tuple[float, float] | None = None,
 ) -> dict[str, float]:
     """Sample ICs from `scenario`, write them to `fdm`, and call run_ic().
 
@@ -344,16 +354,20 @@ def apply_scenario(
     else:
         yaw_rate = _u(rng, *scenario.yaw_rate_dps)
 
-    return apply_initial_conditions(fdm, {
-        "altitude_ft": altitude,
-        "airspeed_kcas": airspeed,
-        "alpha_deg": alpha,
-        "pitch_deg": pitch,
-        "roll_deg": roll_mag,
-        "beta_deg": beta,
-        "yaw_rate_dps": yaw_rate,
-        "throttle": throttle,
-    })
+    return apply_initial_conditions(
+        fdm,
+        {
+            "altitude_ft": altitude,
+            "airspeed_kcas": airspeed,
+            "alpha_deg": alpha,
+            "pitch_deg": pitch,
+            "roll_deg": roll_mag,
+            "beta_deg": beta,
+            "yaw_rate_dps": yaw_rate,
+            "throttle": throttle,
+        },
+        location=location,
+    )
 
 
 def aileron_pos_norm(fdm: jsbsim.FGFDMExec) -> float:

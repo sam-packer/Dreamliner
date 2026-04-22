@@ -16,6 +16,7 @@ import yaml
 from gymnasium import spaces
 
 from dreamliner.utils import jsbsim_utils as J
+from dreamliner.utils.flightgear import FlightGearNativeFDMClient
 from dreamliner.utils.jsbsim_utils import P, ScenarioSpec
 
 
@@ -58,7 +59,6 @@ class StallRecoveryEnv(gym.Env):
 
         cfg = _load_config(config)
         env_cfg = cfg["env"]
-        self._output_directive = J.flightgear_directive_path() if flightgear else None
 
         self._aircraft: str = env_cfg["aircraft"]
         self._sim_dt_hz: int = int(env_cfg["sim_dt_hz"])
@@ -95,6 +95,8 @@ class StallRecoveryEnv(gym.Env):
             ),
         })
 
+        # Drive FlightGear ourselves so packet time/location stay stable after startup.
+        self._flightgear_client = FlightGearNativeFDMClient(sim_dt_hz=self._sim_dt_hz) if flightgear else None
         self._fdm = None
         self._np_random: np.random.Generator | None = None
         self._step_idx: int = 0
@@ -134,7 +136,12 @@ class StallRecoveryEnv(gym.Env):
 
         # JSBSim has known issues being reset in-place across very different ICs;
         # the safest reliable pattern is to rebuild the FDM each episode.
-        self._fdm = J.make_fdm(self._aircraft, self._sim_dt_hz, self._output_directive)
+        self._fdm = J.make_fdm(self._aircraft, self._sim_dt_hz)
+        flightgear_location = (
+            (self._flightgear_client.latitude_deg, self._flightgear_client.longitude_deg)
+            if self._flightgear_client is not None
+            else None
+        )
 
         forced_scenario = None
         forced_ics: dict[str, float] | None = None
@@ -173,9 +180,9 @@ class StallRecoveryEnv(gym.Env):
             curriculum_step = 0
         self._current_scenario_name = scenario_name_out
         if forced_ics is not None:
-            ics = J.apply_initial_conditions(self._fdm, forced_ics)
+            ics = J.apply_initial_conditions(self._fdm, forced_ics, location=flightgear_location)
         else:
-            ics = J.apply_scenario(self._fdm, scenario, self._np_random)
+            ics = J.apply_scenario(self._fdm, scenario, self._np_random, location=flightgear_location)
         if self._gear_up:
             self._fdm[P.gear_cmd_norm] = 0.0
             self._fdm[P.gear_pos_norm] = 0.0
@@ -197,6 +204,8 @@ class StallRecoveryEnv(gym.Env):
         self._episode_altitude_loss_budget_ft = self._max_altitude_loss_budget_ft()
         self._update_episode_diagnostics(initial_raw)
         self._reset_wall_clock_pacing()
+        if self._flightgear_client is not None:
+            self._flightgear_client.send_initial(self._fdm)
 
         obs = self._read_obs()
         info = {"scenario": scenario_name_out, "ics": ics, "curriculum_step": curriculum_step}
@@ -222,6 +231,8 @@ class StallRecoveryEnv(gym.Env):
             if not self._fdm.run():
                 sim_failed = True
                 break
+            if self._flightgear_client is not None:
+                self._flightgear_client.maybe_send(self._fdm)
             self._pace_wall_clock()
 
         obs = self._read_obs()
@@ -313,6 +324,9 @@ class StallRecoveryEnv(gym.Env):
         # underlying object is destroyed before any next reset rebuilds it.
         self._fdm = None
         self._realtime_next_tick = None
+        if self._flightgear_client is not None:
+            self._flightgear_client.close()
+            self._flightgear_client = None
 
     # --- Observation / state ------------------------------------------------
 

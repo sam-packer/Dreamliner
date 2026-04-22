@@ -67,6 +67,10 @@ class DreamerStallEnv:
     def max_episode_seconds(self) -> float:
         return self._env._max_episode_steps / self._env._agent_dt_hz
 
+    @property
+    def scenario_names(self) -> tuple[str, ...]:
+        return self._env._scenario_names
+
     def reset(
         self,
         *,

@@ -3,7 +3,9 @@
     uv run play                                          # 5 episodes from latest run
     uv run play runs/dreamer/baseline                    # 5 episodes from a specific run
     uv run play --episodes 10                            # more episodes
+    uv run play --demo                                   # each configured scenario once, in order
     uv run play --flightgear                             # launch FlightGear + stream in real time
+    uv run play --flightgear --demo                      # cockpit/chase replay for each scenario once
     uv run play --flightgear --no-fg-launch              # you started FG; just stream
     uv run play --flightgear --fg-aircraft c172p         # different FG visual
     uv run play --flightgear --episodes 1 --scenario turning_stall
@@ -40,6 +42,12 @@ _FG_READY_TIMEOUT_SECS = 180.0
 _DEFAULT_FG_REPLAY_VIEWS = ("cockpit", "chase")
 _DEFAULT_FG_COCKPIT_FOV = 90.0
 _SUCCESS_NARRATION = "Success"
+_DEMO_EXCLUDED_SCENARIOS = frozenset({
+    "cruise",
+    "gentle_turn",
+    "pitch_recovery",
+    "slow_flight",
+})
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +58,8 @@ def parse_args() -> argparse.Namespace:
                    help="runs/dreamer/<run> dir. Omit to auto-pick the latest run.")
     p.add_argument("--episodes", type=int, default=5,
                    help="Number of rollouts (default: 5).")
+    p.add_argument("--demo", action="store_true",
+                   help="Run each configured scenario exactly once, in config order.")
     p.add_argument("--flightgear", action="store_true",
                    help="Stream JSBSim state to FlightGear (UDP 5550, 60 Hz). "
                         "Auto-launches FG unless --no-fg-launch is set.")
@@ -81,6 +91,11 @@ def _parse_view_sequence(raw: str) -> list[str]:
     return [token.strip() for token in raw.split(",") if token.strip()]
 
 
+def _demo_scenario_names(scenario_names: tuple[str, ...]) -> list[str]:
+    names = [name for name in scenario_names if name not in _DEMO_EXCLUDED_SCENARIOS]
+    return names or list(scenario_names)
+
+
 def _speak_async(text: str) -> None:
     if sys.platform != "win32":
         return
@@ -103,6 +118,27 @@ def _speak_async(text: str) -> None:
         )
     except OSError:
         pass
+
+
+def _scenario_narration(scenario: str | None) -> str | None:
+    if not scenario:
+        return None
+    return scenario.replace("_", " ")
+
+
+def _maybe_announce_scenario(
+    scenario: str | None,
+    *,
+    narration_state: dict[str, str | None] | None,
+) -> None:
+    narration = _scenario_narration(scenario)
+    if narration is None:
+        return
+    if narration_state is not None and narration_state.get("last_scenario") == scenario:
+        return
+    _speak_async(narration)
+    if narration_state is not None:
+        narration_state["last_scenario"] = scenario
 
 
 def _print_episode_start(
@@ -170,6 +206,8 @@ def _rollout_single_episode(
     replay_count: int | None = None,
     replay_view: str | None = None,
     replay_view_name: str | None = None,
+    announce_scenario: bool = False,
+    narration_state: dict[str, str | None] | None = None,
 ) -> dict:
     agent_dt_hz = env.agent_dt_hz
     success_hold_seconds = env.success_hold_seconds
@@ -214,6 +252,9 @@ def _rollout_single_episode(
             success_hold_seconds=success_hold_seconds,
             header=header,
         )
+    if announce_scenario:
+        _maybe_announce_scenario(str(log["scenario"]) if log["scenario"] is not None else None,
+                                 narration_state=narration_state)
 
     info: dict = {}
     done = False
@@ -291,11 +332,13 @@ def rollout_episodes(
     progress: bool = True,
     *,
     announce_success: bool = False,
+    announce_scenario: bool = False,
     scenario: str | None = None,
     status_interval_steps: int | None = None,
 ) -> list[dict]:
     """Run ``num_episodes`` greedy rollouts; return per-episode trajectory dicts."""
     episodes: list[dict] = []
+    narration_state = {"last_scenario": None} if announce_scenario else None
     for ep in range(num_episodes):
         log = _rollout_single_episode(
             agent,
@@ -306,6 +349,40 @@ def rollout_episodes(
             scenario=scenario,
             initial_conditions=None,
             status_interval_steps=status_interval_steps,
+            announce_scenario=announce_scenario,
+            narration_state=narration_state,
+        )
+        episodes.append(log)
+        if announce_success and log["outcome"] == "success":
+            _speak_async(_SUCCESS_NARRATION)
+    return episodes
+
+
+def rollout_scenario_sequence(
+    agent,
+    env: DreamerStallEnv,
+    scenario_names: list[str],
+    device: str,
+    progress: bool = True,
+    *,
+    announce_success: bool = False,
+    announce_scenario: bool = False,
+    status_interval_steps: int | None = None,
+) -> list[dict]:
+    episodes: list[dict] = []
+    narration_state = {"last_scenario": None} if announce_scenario else None
+    for ep, scenario_name in enumerate(scenario_names):
+        log = _rollout_single_episode(
+            agent,
+            env,
+            device,
+            episode_index=ep,
+            progress=progress,
+            scenario=scenario_name,
+            initial_conditions=None,
+            status_interval_steps=status_interval_steps,
+            announce_scenario=announce_scenario,
+            narration_state=narration_state,
         )
         episodes.append(log)
         if announce_success and log["outcome"] == "success":
@@ -328,6 +405,7 @@ def rollout_flightgear_replays(
 ) -> list[dict]:
     episodes: list[dict] = []
     replay_count = len(replay_views)
+    narration_state = {"last_scenario": None}
     for ep in range(num_episodes):
         replay_scenario = scenario
         replay_ics: dict[str, float] | None = None
@@ -349,6 +427,8 @@ def rollout_flightgear_replays(
                 replay_count=replay_count,
                 replay_view=requested_view,
                 replay_view_name=actual_view,
+                announce_scenario=(replay_index == 0),
+                narration_state=narration_state,
             )
             if replay_index == 0:
                 replay_scenario = str(log["scenario"])
@@ -361,8 +441,58 @@ def rollout_flightgear_replays(
     return episodes
 
 
+def rollout_flightgear_demo_replays(
+    agent,
+    env: DreamerStallEnv,
+    scenario_names: list[str],
+    device: str,
+    *,
+    announce_success: bool = False,
+    replay_views: list[str],
+    cockpit_fov: float,
+    progress: bool = True,
+    status_interval_steps: int | None = None,
+) -> list[dict]:
+    episodes: list[dict] = []
+    replay_count = len(replay_views)
+    narration_state = {"last_scenario": None}
+    for ep, scenario_name in enumerate(scenario_names):
+        last_log: dict[str, Any] | None = None
+        replay_ics: dict[str, float] | None = None
+        for replay_index, requested_view in enumerate(replay_views):
+            actual_view = configure_inspection_view(requested_view, cockpit_fov=cockpit_fov)
+            header = f"replay={replay_index + 1}/{replay_count}  view={requested_view}->{actual_view}"
+            log = _rollout_single_episode(
+                agent,
+                env,
+                device,
+                episode_index=ep,
+                progress=progress,
+                scenario=scenario_name,
+                initial_conditions=replay_ics,
+                status_interval_steps=status_interval_steps,
+                header=header,
+                replay_index=replay_index,
+                replay_count=replay_count,
+                replay_view=requested_view,
+                replay_view_name=actual_view,
+                announce_scenario=(replay_index == 0),
+                narration_state=narration_state,
+            )
+            if replay_index == 0:
+                replay_ics = dict(log["initial_conditions"])
+            episodes.append(log)
+            last_log = log
+            time.sleep(0.25)
+        if announce_success and last_log is not None and last_log["outcome"] == "success":
+            _speak_async(_SUCCESS_NARRATION)
+    return episodes
+
+
 def main() -> None:
     args = parse_args()
+    if args.demo and args.scenario is not None:
+        raise ValueError("--demo cannot be combined with --scenario")
     logdir = Path(args.logdir) if args.logdir else find_latest_run()
     if not args.logdir:
         print(f"No logdir given; using latest run: {logdir}")
@@ -402,7 +532,31 @@ def main() -> None:
         curriculum_step_file=curriculum_step_file,
     )
     try:
-        if args.flightgear and replay_views:
+        if args.demo:
+            scenario_names = _demo_scenario_names(env.scenario_names)
+            print(f"Demo mode: {len(scenario_names)} stall/upset scenarios in config order.")
+            if args.flightgear and replay_views:
+                episodes = rollout_flightgear_demo_replays(
+                    agent,
+                    env,
+                    scenario_names,
+                    device,
+                    announce_success=True,
+                    replay_views=replay_views,
+                    cockpit_fov=args.fg_cockpit_fov,
+                    status_interval_steps=env.agent_dt_hz,
+                )
+            else:
+                episodes = rollout_scenario_sequence(
+                    agent,
+                    env,
+                    scenario_names,
+                    device,
+                    announce_success=args.flightgear,
+                    announce_scenario=args.flightgear,
+                    status_interval_steps=env.agent_dt_hz if args.flightgear else None,
+                )
+        elif args.flightgear and replay_views:
             episodes = rollout_flightgear_replays(
                 agent,
                 env,
@@ -421,6 +575,7 @@ def main() -> None:
                 args.episodes,
                 device,
                 announce_success=args.flightgear,
+                announce_scenario=args.flightgear,
                 scenario=args.scenario,
                 status_interval_steps=env.agent_dt_hz if args.flightgear else None,
             )
